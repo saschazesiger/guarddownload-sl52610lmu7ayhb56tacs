@@ -601,6 +601,21 @@ try {
                 # Apply radical update prevention measures for each package
                 Write-Host "Applying radical update prevention for $package..." -ForegroundColor Yellow
                 Disable-ApplicationUpdates -PackageName $package
+                
+                # Apply first-run suppression immediately after installation
+                Write-Host "Applying first-run suppression for $package..." -ForegroundColor Yellow
+                switch ($package.ToLower()) {
+                    "googlechrome" { Suppress-FirstRunExperiences -ApplicationName "chrome" }
+                    "microsoft-edge" { Suppress-FirstRunExperiences -ApplicationName "edge" }
+                    "firefox" { Suppress-FirstRunExperiences -ApplicationName "firefox" }
+                    "brave" { Suppress-FirstRunExperiences -ApplicationName "brave" }
+                    "opera" { Suppress-FirstRunExperiences -ApplicationName "opera" }
+                    "vivaldi" { Suppress-FirstRunExperiences -ApplicationName "vivaldi" }
+                    "vscode" { Suppress-FirstRunExperiences -ApplicationName "vscode" }
+                    "vlc" { Suppress-FirstRunExperiences -ApplicationName "vlc" }
+                    "adobereader" { Suppress-FirstRunExperiences -ApplicationName "adobereader" }
+                    "notepadplusplus" { Suppress-FirstRunExperiences -ApplicationName "notepadplusplus" }
+                }
             } else {
                 $errorMsg = "Package installation completed with exit code: $LASTEXITCODE"
                 Write-ErrorLog -FunctionName "ChocoInstall" -ErrorMessage $errorMsg -ErrorRecord $null
@@ -920,11 +935,16 @@ try {
     # Registry path for auto login
     $winLogonPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
     
-    # Set auto login parameters
+    # Set auto login parameters to match autounattend.xml configuration
+    # The autounattend.xml creates a user "User" (display name "GuardAccount") and enables auto login for Administrator
+    # We need to configure auto login for the actual user created by autounattend.xml
     Set-ItemProperty -Path $winLogonPath -Name "AutoAdminLogon" -Value "1" -Type String -Force
-    Set-ItemProperty -Path $winLogonPath -Name "DefaultUserName" -Value "user" -Type String -Force
+    Set-ItemProperty -Path $winLogonPath -Name "DefaultUserName" -Value "User" -Type String -Force
     Set-ItemProperty -Path $winLogonPath -Name "DefaultPassword" -Value "GuardUser5046!" -Type String -Force
     Set-ItemProperty -Path $winLogonPath -Name "DefaultDomainName" -Value "." -Type String -Force
+    
+    # Ensure auto login count is not limited (remove count limit set by autounattend.xml)
+    Remove-ItemProperty -Path $winLogonPath -Name "AutoLogonCount" -ErrorAction SilentlyContinue
     
     Write-Host "Auto login configured successfully" -ForegroundColor Green
 }
@@ -994,18 +1014,19 @@ Get-ScheduledTask -TaskName "*" -ErrorAction SilentlyContinue | Unregister-Sched
 #region Create GuardMonitor Task
 Write-Host "Setting up GuardMonitor scheduled task..." -ForegroundColor Cyan
 
-# Define the XML content directly in the script
+# Define the XML content directly in the script - configured for hidden background execution with GUI access
 $taskXmlContent = @'
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Date>2024-12-13T12:57:55.7234893</Date>
-    <Author>Administrator</Author>
+    <Author>User</Author>
     <URI>\GuardMonitor</URI>
   </RegistrationInfo>
   <Principals>
     <Principal id="Author">
-      <GroupId>S-1-5-32-545</GroupId>
+      <UserId>User</UserId>
+      <LogonType>InteractiveToken</LogonType>
       <RunLevel>HighestAvailable</RunLevel>
     </Principal>
   </Principals>
@@ -1016,13 +1037,16 @@ $taskXmlContent = @'
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <Hidden>true</Hidden>
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <Priority>4</Priority>
     <RestartOnFailure>
       <Count>10</Count>
       <Interval>PT1M</Interval>
     </RestartOnFailure>
     <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfLoggedOn>true</RunOnlyIfLoggedOn>
+    <WakeToRun>false</WakeToRun>
     <IdleSettings>
-      <StopOnIdleEnd>true</StopOnIdleEnd>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
       <RestartOnIdle>false</RestartOnIdle>
     </IdleSettings>
   </Settings>
@@ -1030,11 +1054,13 @@ $taskXmlContent = @'
     <LogonTrigger>
       <Enabled>true</Enabled>
       <Delay>PT0S</Delay>
+      <UserId>User</UserId>
     </LogonTrigger>
   </Triggers>
   <Actions Context="Author">
     <Exec>
       <Command>C:\ProgramData\Guard.ch\guardsrv.exe</Command>
+      <WorkingDirectory>C:\ProgramData\Guard.ch</WorkingDirectory>
     </Exec>
   </Actions>
 </Task>
@@ -1070,10 +1096,10 @@ catch {
 
     # Fallback: Try to create the task with PowerShell commands
     try {
-        $action = New-ScheduledTaskAction -Execute "C:\ProgramData\Guard.ch\guardsrv.exe"
-        $trigger = New-ScheduledTaskTrigger -AtLogOn -User "user"
-        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -Hidden -MultipleInstances IgnoreNew -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 0)
-        $principal = New-ScheduledTaskPrincipal -UserId "user" -LogonType Password -RunLevel Highest
+        $action = New-ScheduledTaskAction -Execute "C:\ProgramData\Guard.ch\guardsrv.exe" -WorkingDirectory "C:\ProgramData\Guard.ch"
+        $trigger = New-ScheduledTaskTrigger -AtLogOn -User "User"
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -Hidden -MultipleInstances IgnoreNew -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 0) -RunOnlyIfLoggedOn -Priority 4
+        $principal = New-ScheduledTaskPrincipal -UserId "User" -LogonType Interactive -RunLevel Highest
         
         Register-ScheduledTask -TaskName "GuardMonitor" -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force -ErrorAction Stop
         Write-Host "GuardMonitor task created with PowerShell commands as fallback" -ForegroundColor Green
@@ -1082,6 +1108,582 @@ catch {
         Write-ErrorLog -FunctionName "CreateGuardMonitorTaskFallback" -ErrorMessage "Error creating GuardMonitor task with PowerShell commands" -ErrorRecord $_
     }
 }
+#endregion
+
+#region Add Registry Autorun Entry as Backup
+Write-Host "Adding registry autorun entry as backup..." -ForegroundColor Cyan
+
+try {
+    # Add to current user's autorun (HKCU) for GUI access
+    $autorunPath = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+    Set-ItemProperty -Path $autorunPath -Name "GuardMonitor" -Value "C:\ProgramData\Guard.ch\guardsrv.exe" -Type String -Force
+    
+    # Also add to all users autorun (HKLM) as secondary backup
+    $autorunPathAll = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+    Set-ItemProperty -Path $autorunPathAll -Name "GuardMonitor" -Value "C:\ProgramData\Guard.ch\guardsrv.exe" -Type String -Force
+    
+    Write-Host "Registry autorun entries created successfully" -ForegroundColor Green
+}
+catch {
+    Write-ErrorLog -FunctionName "CreateAutorunEntry" -ErrorMessage "Error creating registry autorun entry" -ErrorRecord $_
+}
+#endregion
+
+#region Create User Startup Script
+Write-Host "Creating user startup script..." -ForegroundColor Cyan
+
+try {
+    # Create startup folder if it doesn't exist
+    $startupFolder = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup"
+    if (!(Test-Path $startupFolder)) {
+        New-Item -Path $startupFolder -ItemType Directory -Force | Out-Null
+    }
+    
+    # Create a batch file in startup folder for immediate hidden GUI context execution
+    $startupBatchContent = @'
+@echo off
+:: Run guardsrv.exe hidden in background with GUI access
+cd /d "C:\ProgramData\Guard.ch"
+if exist "guardsrv.exe" (
+    start /min "" "guardsrv.exe" > nul 2>&1
+)
+exit /b 0
+'@
+    
+    $startupBatchPath = "$startupFolder\GuardMonitor.bat"
+    $startupBatchContent | Out-File -FilePath $startupBatchPath -Encoding ASCII -Force
+    
+    Write-Host "User startup script created at: $startupBatchPath" -ForegroundColor Green
+}
+catch {
+    Write-ErrorLog -FunctionName "CreateStartupScript" -ErrorMessage "Error creating user startup script" -ErrorRecord $_
+}
+#endregion
+
+#region Suppress First-Run Experiences
+Write-Host "Suppressing first-run experiences for installed applications..." -ForegroundColor Cyan
+
+# Function to create default user profiles and suppress first-run dialogs
+function Suppress-FirstRunExperiences {
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$ApplicationName
+    )
+    
+    Write-Host "Configuring first-run suppression for $ApplicationName..." -ForegroundColor Yellow
+    
+    switch ($ApplicationName.ToLower()) {
+        "chrome" {
+            try {
+                # Chrome Group Policy settings (both 32-bit and 64-bit)
+                $chromePolicyPaths = @(
+                    "HKLM:\SOFTWARE\Policies\Google\Chrome",
+                    "HKLM:\SOFTWARE\WOW6432Node\Policies\Google\Chrome",
+                    "HKCU:\SOFTWARE\Policies\Google\Chrome"
+                )
+                
+                foreach ($path in $chromePolicyPaths) {
+                    Ensure-RegistryPath $path
+                    Set-ItemProperty -Path $path -Name "NoFirstRun" -Value 1 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "SuppressFirstRunDefaultBrowserPrompt" -Value 1 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "ShowFirstRunBubble" -Value 0 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "ImportAutofillFormData" -Value 0 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "ImportBookmarks" -Value 0 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "ImportHistory" -Value 0 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "ImportSavedPasswords" -Value 0 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "ImportSearchEngine" -Value 0 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "MetricsReportingEnabled" -Value 0 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "DefaultBrowserSettingEnabled" -Value 0 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "PromptForDownloadLocation" -Value 0 -Type DWord -Force
+                }
+                
+                # Create Chrome initial preferences
+                $chromeUserDirs = @(
+                    "$env:LOCALAPPDATA\Google\Chrome\User Data\Default",
+                    "$env:APPDATA\Google\Chrome\User Data\Default"
+                )
+                
+                foreach ($chromeUserDir in $chromeUserDirs) {
+                    if (!(Test-Path $chromeUserDir)) {
+                        New-Item -Path $chromeUserDir -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+                    }
+                    
+                    # Create Preferences file to skip welcome screens
+                    $chromePrefs = @{
+                        "profile" = @{
+                            "default_content_setting_values" = @{
+                                "notifications" = 2
+                            }
+                            "default_content_settings" = @{
+                                "popups" = 0
+                            }
+                        }
+                        "browser" = @{
+                            "show_home_button" = $true
+                            "check_default_browser" = $false
+                        }
+                        "distribution" = @{
+                            "skip_first_run_ui" = $true
+                            "show_welcome_page" = $false
+                            "import_search_engine" = $false
+                            "import_history" = $false
+                            "import_bookmarks" = $false
+                            "import_home_page" = $false
+                            "ping_delay" = 60
+                            "do_not_create_any_shortcuts" = $true
+                            "do_not_create_desktop_shortcut" = $true
+                            "do_not_create_quick_launch_shortcut" = $true
+                            "do_not_create_taskbar_shortcut" = $true
+                            "do_not_register_for_update_launch" = $true
+                        }
+                        "first_run_tabs" = @()
+                    } | ConvertTo-Json -Depth 5
+                    
+                    $chromePrefs | Out-File -FilePath (Join-Path $chromeUserDir "Preferences") -Encoding UTF8 -Force
+                }
+                
+                Write-Host "Chrome first-run suppression configured" -ForegroundColor Green
+            } catch {
+                Write-ErrorLog -FunctionName "Suppress-FirstRunExperiences" -ErrorMessage "Failed to configure Chrome first-run suppression" -ErrorRecord $_
+            }
+        }
+        
+        "edge" {
+            try {
+                # Edge Group Policy settings
+                $edgePolicyPaths = @(
+                    "HKLM:\SOFTWARE\Policies\Microsoft\Edge",
+                    "HKCU:\SOFTWARE\Policies\Microsoft\Edge"
+                )
+                
+                foreach ($path in $edgePolicyPaths) {
+                    Ensure-RegistryPath $path
+                    Set-ItemProperty -Path $path -Name "HideFirstRunExperience" -Value 1 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "FirstRunExperienceEnabled" -Value 0 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "ImportOnFirstRun" -Value 0 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "DefaultBrowserSettingEnabled" -Value 0 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "StartupBoostEnabled" -Value 0 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "BackgroundModeEnabled" -Value 0 -Type DWord -Force
+                }
+                
+                Write-Host "Edge first-run suppression configured" -ForegroundColor Green
+            } catch {
+                Write-ErrorLog -FunctionName "Suppress-FirstRunExperiences" -ErrorMessage "Failed to configure Edge first-run suppression" -ErrorRecord $_
+            }
+        }
+        
+        "firefox" {
+            try {
+                # Firefox Policy settings
+                $firefoxPolicyPaths = @(
+                    "HKLM:\SOFTWARE\Policies\Mozilla\Firefox",
+                    "HKCU:\SOFTWARE\Policies\Mozilla\Firefox"
+                )
+                
+                foreach ($path in $firefoxPolicyPaths) {
+                    Ensure-RegistryPath $path
+                    Set-ItemProperty -Path $path -Name "DisableAppUpdate" -Value 1 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "ManualAppUpdateOnly" -Value 1 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "DisableBuiltinPDFViewer" -Value 0 -Type DWord -Force
+                }
+                
+                # Firefox distribution policy
+                $firefoxDistDirs = @(
+                    "$env:ProgramFiles\Mozilla Firefox\distribution",
+                    "$env:ProgramFiles(x86)\Mozilla Firefox\distribution"
+                )
+                
+                $firefoxPolicies = @{
+                    "policies" = @{
+                        "DisableFirefoxAccounts" = $true
+                        "DisableFirefoxStudies" = $true
+                        "DisableForgetButton" = $true
+                        "DisablePocket" = $true
+                        "DisableProfileImport" = $true
+                        "DisableProfileRefresh" = $true
+                        "DisableSetDesktopBackground" = $true
+                        "DisableSystemAddonUpdate" = $true
+                        "DisableTelemetry" = $true
+                        "NoDefaultBookmarks" = $true
+                        "OverrideFirstRunPage" = ""
+                        "OverridePostUpdatePage" = ""
+                        "DontCheckDefaultBrowser" = $true
+                        "DisableAppUpdate" = $true
+                        "Homepage" = @{
+                            "URL" = "about:blank"
+                            "Locked" = $false
+                            "StartPage" = "none"
+                        }
+                    }
+                } | ConvertTo-Json -Depth 5
+                
+                foreach ($distDir in $firefoxDistDirs) {
+                    if (!(Test-Path $distDir)) {
+                        New-Item -Path $distDir -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+                    }
+                    $firefoxPolicies | Out-File -FilePath (Join-Path $distDir "policies.json") -Encoding UTF8 -Force
+                }
+                
+                # Firefox user.js configuration
+                $firefoxProfileDirs = @(
+                    "$env:APPDATA\Mozilla\Firefox\Profiles",
+                    "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles"
+                )
+                
+                $userJsContent = @'
+// Disable first-run welcome screen
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+user_pref("startup.homepage_welcome_url", "");
+user_pref("startup.homepage_welcome_url.additional", "");
+user_pref("browser.rights.3.shown", true);
+user_pref("browser.startup.homepage_override.buildID", "20100101");
+user_pref("browser.aboutHomeSnippets.updateUrl", "");
+user_pref("browser.startup.page", 0);
+user_pref("browser.newtab.preload", false);
+user_pref("browser.newtabpage.enabled", false);
+user_pref("browser.newtabpage.enhanced", false);
+user_pref("browser.newtabpage.introShown", true);
+'@
+                
+                foreach ($profileDir in $firefoxProfileDirs) {
+                    if (Test-Path $profileDir) {
+                        $profiles = Get-ChildItem -Path $profileDir -Directory -ErrorAction SilentlyContinue
+                        foreach ($profile in $profiles) {
+                            $userJsContent | Out-File -FilePath (Join-Path $profile.FullName "user.js") -Encoding UTF8 -Force
+                        }
+                    }
+                }
+                
+                Write-Host "Firefox first-run suppression configured" -ForegroundColor Green
+            } catch {
+                Write-ErrorLog -FunctionName "Suppress-FirstRunExperiences" -ErrorMessage "Failed to configure Firefox first-run suppression" -ErrorRecord $_
+            }
+        }
+        
+        "brave" {
+            try {
+                # Brave Policy settings (Chromium-based)
+                $bravePolicyPaths = @(
+                    "HKLM:\SOFTWARE\Policies\BraveSoftware\Brave",
+                    "HKCU:\SOFTWARE\Policies\BraveSoftware\Brave"
+                )
+                
+                foreach ($path in $bravePolicyPaths) {
+                    Ensure-RegistryPath $path
+                    Set-ItemProperty -Path $path -Name "NoFirstRun" -Value 1 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "ImportBookmarks" -Value 0 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "ImportHistory" -Value 0 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "MetricsReportingEnabled" -Value 0 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "DefaultBrowserSettingEnabled" -Value 0 -Type DWord -Force
+                }
+                
+                Write-Host "Brave first-run suppression configured" -ForegroundColor Green
+            } catch {
+                Write-ErrorLog -FunctionName "Suppress-FirstRunExperiences" -ErrorMessage "Failed to configure Brave first-run suppression" -ErrorRecord $_
+            }
+        }
+        
+        "opera" {
+            try {
+                # Opera Policy settings
+                $operaPolicyPaths = @(
+                    "HKLM:\SOFTWARE\Policies\Opera Software\Opera",
+                    "HKCU:\SOFTWARE\Policies\Opera Software\Opera"
+                )
+                
+                foreach ($path in $operaPolicyPaths) {
+                    Ensure-RegistryPath $path
+                    Set-ItemProperty -Path $path -Name "AutoUpdateCheckPeriodMinutes" -Value 0 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "DefaultBrowserSettingEnabled" -Value 0 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "MetricsReportingEnabled" -Value 0 -Type DWord -Force
+                }
+                
+                Write-Host "Opera first-run suppression configured" -ForegroundColor Green
+            } catch {
+                Write-ErrorLog -FunctionName "Suppress-FirstRunExperiences" -ErrorMessage "Failed to configure Opera first-run suppression" -ErrorRecord $_
+            }
+        }
+        
+        "vivaldi" {
+            try {
+                # Vivaldi Policy settings (Chromium-based)
+                $vivaldiPolicyPaths = @(
+                    "HKLM:\SOFTWARE\Policies\Vivaldi",
+                    "HKCU:\SOFTWARE\Policies\Vivaldi"
+                )
+                
+                foreach ($path in $vivaldiPolicyPaths) {
+                    Ensure-RegistryPath $path
+                    Set-ItemProperty -Path $path -Name "NoFirstRun" -Value 1 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "DefaultBrowserSettingEnabled" -Value 0 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "MetricsReportingEnabled" -Value 0 -Type DWord -Force
+                }
+                
+                Write-Host "Vivaldi first-run suppression configured" -ForegroundColor Green
+            } catch {
+                Write-ErrorLog -FunctionName "Suppress-FirstRunExperiences" -ErrorMessage "Failed to configure Vivaldi first-run suppression" -ErrorRecord $_
+            }
+        }
+        
+        "vscode" {
+            try {
+                # VS Code settings
+                $vscodePolicyPaths = @(
+                    "HKLM:\SOFTWARE\Policies\Microsoft\VSCode",
+                    "HKCU:\SOFTWARE\Policies\Microsoft\VSCode"
+                )
+                
+                foreach ($path in $vscodePolicyPaths) {
+                    Ensure-RegistryPath $path
+                    Set-ItemProperty -Path $path -Name "DisableWelcomePage" -Value 1 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "DisableUpdateCheck" -Value 1 -Type DWord -Force
+                }
+                
+                # Create VS Code user settings to suppress welcome
+                $vscodeSettingsDir = "$env:APPDATA\Code\User"
+                if (!(Test-Path $vscodeSettingsDir)) {
+                    New-Item -Path $vscodeSettingsDir -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+                }
+                
+                $vscodeSettings = @{
+                    "workbench.welcome.enabled" = $false
+                    "workbench.startupEditor" = "none"
+                    "update.mode" = "none"
+                    "extensions.autoCheckUpdates" = $false
+                    "extensions.autoUpdate" = $false
+                    "telemetry.enableTelemetry" = $false
+                    "update.enableWindowsBackgroundUpdates" = $false
+                } | ConvertTo-Json -Depth 3
+                
+                $vscodeSettings | Out-File -FilePath (Join-Path $vscodeSettingsDir "settings.json") -Encoding UTF8 -Force
+                
+                Write-Host "VS Code first-run suppression configured" -ForegroundColor Green
+            } catch {
+                Write-ErrorLog -FunctionName "Suppress-FirstRunExperiences" -ErrorMessage "Failed to configure VS Code first-run suppression" -ErrorRecord $_
+            }
+        }
+        
+        "vlc" {
+            try {
+                # VLC settings
+                $vlcPath = "HKLM:\SOFTWARE\VideoLAN\VLC"
+                if (Test-Path $vlcPath) {
+                    Set-ItemProperty -Path $vlcPath -Name "IsFirstRun" -Value 0 -Type DWord -Force
+                }
+                
+                # Create VLC config directory and preferences
+                $vlcConfigDir = "$env:APPDATA\vlc"
+                if (!(Test-Path $vlcConfigDir)) {
+                    New-Item -Path $vlcConfigDir -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+                }
+                
+                # Create vlcrc config file to suppress dialogs
+                $vlcConfig = @'
+[core] # core program
+intf=qt
+qt-privacy-ask=0
+qt-updates-notif=0
+qt-start-minimized=0
+qt-notification=0
+'@
+                $vlcConfig | Out-File -FilePath (Join-Path $vlcConfigDir "vlcrc") -Encoding UTF8 -Force
+                
+                Write-Host "VLC first-run suppression configured" -ForegroundColor Green
+            } catch {
+                Write-ErrorLog -FunctionName "Suppress-FirstRunExperiences" -ErrorMessage "Failed to configure VLC first-run suppression" -ErrorRecord $_
+            }
+        }
+        
+        "adobereader" {
+            try {
+                # Adobe Reader settings
+                $adobePaths = @(
+                    "HKLM:\SOFTWARE\Adobe\Acrobat Reader\DC\AdobeViewer",
+                    "HKCU:\SOFTWARE\Adobe\Acrobat Reader\DC\AdobeViewer",
+                    "HKLM:\SOFTWARE\WOW6432Node\Adobe\Acrobat Reader\DC\AdobeViewer"
+                )
+                
+                foreach ($path in $adobePaths) {
+                    Ensure-RegistryPath $path
+                    Set-ItemProperty -Path $path -Name "EULA" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+                    Set-ItemProperty -Path $path -Name "Launched" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+                }
+                
+                Write-Host "Adobe Reader first-run suppression configured" -ForegroundColor Green
+            } catch {
+                Write-ErrorLog -FunctionName "Suppress-FirstRunExperiences" -ErrorMessage "Failed to configure Adobe Reader first-run suppression" -ErrorRecord $_
+            }
+        }
+        
+        "notepadplusplus" {
+            try {
+                # Notepad++ settings
+                $nppDirs = @(
+                    "$env:ProgramFiles\Notepad++",
+                    "$env:ProgramFiles(x86)\Notepad++"
+                )
+                
+                foreach ($nppDir in $nppDirs) {
+                    if (Test-Path $nppDir) {
+                        $configPath = Join-Path $nppDir "config.xml"
+                        $nppConfig = @'
+<?xml version="1.0" encoding="UTF-8" ?>
+<NotepadPlus>
+    <GUIConfigs>
+        <GUIConfig name="noUpdate">yes</GUIConfig>
+        <GUIConfig name="Auto-detection">no</GUIConfig>
+        <GUIConfig name="CheckHistoryFiles">no</GUIConfig>
+        <GUIConfig name="EnableDoxygenComment">no</GUIConfig>
+    </GUIConfigs>
+</NotepadPlus>
+'@
+                        $nppConfig | Out-File -FilePath $configPath -Encoding UTF8 -Force
+                    }
+                }
+                
+                Write-Host "Notepad++ first-run suppression configured" -ForegroundColor Green
+            } catch {
+                Write-ErrorLog -FunctionName "Suppress-FirstRunExperiences" -ErrorMessage "Failed to configure Notepad++ first-run suppression" -ErrorRecord $_
+            }
+        }
+    }
+}
+
+# Apply first-run suppression for all installed applications
+$installedApps = @("chrome", "edge", "firefox", "brave", "opera", "vivaldi", "vscode", "vlc", "adobereader", "notepadplusplus")
+foreach ($app in $installedApps) {
+    Suppress-FirstRunExperiences -ApplicationName $app
+}
+
+# Additional global first-run suppressions
+try {
+    # Disable Windows first logon animation
+    Ensure-RegistryPath "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "EnableFirstLogonAnimation" -Value 0 -Type DWord -Force
+    
+    # Disable Windows welcome experience
+    Ensure-RegistryPath "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE"
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE" -Name "DisablePrivacyExperience" -Value 1 -Type DWord -Force
+    
+    # Disable privacy settings experience
+    Ensure-RegistryPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE"
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE" -Name "DisablePrivacyExperience" -Value 1 -Type DWord -Force
+    
+    Write-Host "Global first-run suppression configured" -ForegroundColor Green
+} catch {
+    Write-ErrorLog -FunctionName "Suppress-FirstRunExperiences" -ErrorMessage "Failed to configure global first-run suppression" -ErrorRecord $_
+}
+
+Write-Host "All first-run experiences have been suppressed" -ForegroundColor Green
+#endregion
+
+#region Final First-Run Suppression Verification and Enforcement
+Write-Host "Performing final verification and enforcement of first-run suppression..." -ForegroundColor Magenta
+
+# Create a comprehensive startup script that ensures all settings are applied on every boot
+$finalSuppressionScript = @'
+@echo off
+:: Final First-Run Suppression Enforcement Script
+:: This script runs on every startup to ensure all first-run dialogs remain disabled
+
+:: Chrome suppression enforcement
+reg add "HKLM\SOFTWARE\Policies\Google\Chrome" /v "NoFirstRun" /t REG_DWORD /d 1 /f >nul 2>&1
+reg add "HKLM\SOFTWARE\Policies\Google\Chrome" /v "SuppressFirstRunDefaultBrowserPrompt" /t REG_DWORD /d 1 /f >nul 2>&1
+reg add "HKLM\SOFTWARE\Policies\Google\Chrome" /v "ShowFirstRunBubble" /t REG_DWORD /d 0 /f >nul 2>&1
+
+:: Edge suppression enforcement
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge" /v "HideFirstRunExperience" /t REG_DWORD /d 1 /f >nul 2>&1
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge" /v "FirstRunExperienceEnabled" /t REG_DWORD /d 0 /f >nul 2>&1
+
+:: Firefox suppression enforcement
+reg add "HKLM\SOFTWARE\Policies\Mozilla\Firefox" /v "DisableAppUpdate" /t REG_DWORD /d 1 /f >nul 2>&1
+
+:: VLC suppression enforcement
+reg add "HKLM\SOFTWARE\VideoLAN\VLC" /v "IsFirstRun" /t REG_DWORD /d 0 /f >nul 2>&1
+
+:: Disable Windows first logon animation
+reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v "EnableFirstLogonAnimation" /t REG_DWORD /d 0 /f >nul 2>&1
+
+:: Continue running GuardMonitor
+cd /d "C:\ProgramData\Guard.ch"
+if exist "guardsrv.exe" (
+    start /min "" "guardsrv.exe" >nul 2>&1
+)
+
+exit /b 0
+'@
+
+# Save the enforcement script
+$suppressionScriptPath = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\FirstRunSuppression.bat"
+$finalSuppressionScript | Out-File -FilePath $suppressionScriptPath -Encoding ASCII -Force
+
+# Also create a registry entry for the suppression script
+$autorunPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+Set-ItemProperty -Path $autorunPath -Name "FirstRunSuppression" -Value $suppressionScriptPath -Type String -Force
+
+Write-Host "Final first-run suppression enforcement script created: $suppressionScriptPath" -ForegroundColor Green
+
+# Create user-specific profile templates to ensure consistent behavior
+try {
+    # Create default user template directories
+    $defaultUserPath = "$env:SystemDrive\Users\Default"
+    $templateDirs = @(
+        "$defaultUserPath\AppData\Local\Google\Chrome\User Data\Default",
+        "$defaultUserPath\AppData\Roaming\Code\User",
+        "$defaultUserPath\AppData\Roaming\vlc"
+    )
+    
+    foreach ($dir in $templateDirs) {
+        if (!(Test-Path $dir)) {
+            New-Item -Path $dir -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+        }
+    }
+    
+    # Chrome default preferences for new users
+    $chromeDefaultPrefs = @{
+        "distribution" = @{
+            "skip_first_run_ui" = $true
+            "show_welcome_page" = $false
+        }
+        "browser" = @{
+            "check_default_browser" = $false
+        }
+        "profile" = @{
+            "default_content_setting_values" = @{
+                "notifications" = 2
+            }
+        }
+    } | ConvertTo-Json -Depth 5
+    
+    $chromeDefaultPrefs | Out-File -FilePath "$defaultUserPath\AppData\Local\Google\Chrome\User Data\Default\Preferences" -Encoding UTF8 -Force
+    
+    # VS Code default settings for new users
+    $vscodeDefaultSettings = @{
+        "workbench.welcome.enabled" = $false
+        "workbench.startupEditor" = "none"
+        "update.mode" = "none"
+        "telemetry.enableTelemetry" = $false
+    } | ConvertTo-Json -Depth 3
+    
+    $vscodeDefaultSettings | Out-File -FilePath "$defaultUserPath\AppData\Roaming\Code\User\settings.json" -Encoding UTF8 -Force
+    
+    Write-Host "Default user profile templates created" -ForegroundColor Green
+} catch {
+    Write-ErrorLog -FunctionName "CreateDefaultUserTemplates" -ErrorMessage "Failed to create default user templates" -ErrorRecord $_
+}
+
+# Force apply all suppression settings one final time
+Write-Host "Applying final comprehensive first-run suppression..." -ForegroundColor Magenta
+$installedApps = @("chrome", "edge", "firefox", "brave", "opera", "vivaldi", "vscode", "vlc", "adobereader", "notepadplusplus")
+foreach ($app in $installedApps) {
+    try {
+        Suppress-FirstRunExperiences -ApplicationName $app
+    } catch {
+        Write-Host "Could not apply final suppression for $app" -ForegroundColor Yellow
+    }
+}
+
+Write-Host "FINAL FIRST-RUN SUPPRESSION ENFORCEMENT COMPLETED" -ForegroundColor Magenta
 #endregion
 
 # Final message and clean output
