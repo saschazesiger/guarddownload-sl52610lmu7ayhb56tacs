@@ -1195,6 +1195,12 @@ function Suppress-FirstRunExperiences {
                     Set-ItemProperty -Path $path -Name "MetricsReportingEnabled" -Value 0 -Type DWord -Force
                     Set-ItemProperty -Path $path -Name "DefaultBrowserSettingEnabled" -Value 0 -Type DWord -Force
                     Set-ItemProperty -Path $path -Name "PromptForDownloadLocation" -Value 0 -Type DWord -Force
+                    # Suppress sign-in and sync prompts
+                    Set-ItemProperty -Path $path -Name "SyncDisabled" -Value 1 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "BrowserSignin" -Value 0 -Type DWord -Force
+                    # Disable Privacy Sandbox prompts
+                    Set-ItemProperty -Path $path -Name "PrivacySandboxEnabled" -Value 0 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "PrivacySandboxSettingsReconciliationEnabled" -Value 0 -Type DWord -Force
                 }
                 
                 # Create Chrome initial preferences
@@ -1208,7 +1214,7 @@ function Suppress-FirstRunExperiences {
                         New-Item -Path $chromeUserDir -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
                     }
                     
-                    # Create Preferences file to skip welcome screens
+                    # Create Preferences file to skip welcome screens and sign-in
                     $chromePrefs = @{
                         "profile" = @{
                             "default_content_setting_values" = @{
@@ -1225,6 +1231,7 @@ function Suppress-FirstRunExperiences {
                         "distribution" = @{
                             "skip_first_run_ui" = $true
                             "show_welcome_page" = $false
+                            "skip_profile_signin_promo" = $true
                             "import_search_engine" = $false
                             "import_history" = $false
                             "import_bookmarks" = $false
@@ -1235,6 +1242,13 @@ function Suppress-FirstRunExperiences {
                             "do_not_create_quick_launch_shortcut" = $true
                             "do_not_create_taskbar_shortcut" = $true
                             "do_not_register_for_update_launch" = $true
+                        }
+                        "privacy" = @{
+                            "sandbox" = @{
+                                "settings" = @{
+                                    "enabled" = $false
+                                }
+                            }
                         }
                         "first_run_tabs" = @()
                     } | ConvertTo-Json -Depth 5
@@ -1275,16 +1289,15 @@ function Suppress-FirstRunExperiences {
         "firefox" {
             try {
                 # Firefox Policy settings
-                $firefoxPolicyPaths = @(
+                $firefoxPaths = @(
                     "HKLM:\SOFTWARE\Policies\Mozilla\Firefox",
                     "HKCU:\SOFTWARE\Policies\Mozilla\Firefox"
                 )
                 
-                foreach ($path in $firefoxPolicyPaths) {
+                foreach ($path in $firefoxPaths) {
                     Ensure-RegistryPath $path
                     Set-ItemProperty -Path $path -Name "DisableAppUpdate" -Value 1 -Type DWord -Force
                     Set-ItemProperty -Path $path -Name "ManualAppUpdateOnly" -Value 1 -Type DWord -Force
-                    Set-ItemProperty -Path $path -Name "DisableBuiltinPDFViewer" -Value 0 -Type DWord -Force
                 }
                 
                 # Firefox distribution policy
@@ -1295,25 +1308,35 @@ function Suppress-FirstRunExperiences {
                 
                 $firefoxPolicies = @{
                     "policies" = @{
-                        "DisableFirefoxAccounts" = $true
-                        "DisableFirefoxStudies" = $true
-                        "DisableForgetButton" = $true
-                        "DisablePocket" = $true
-                        "DisableProfileImport" = $true
-                        "DisableProfileRefresh" = $true
+                        "DisableFirefoxAccounts"       = $true
+                        "DisableFirefoxStudies"       = $true
+                        "DisableForgetButton"         = $true
+                        "DisablePocket"               = $true
+                        "DisableProfileImport"        = $true
+                        "DisableProfileRefresh"       = $true
                         "DisableSetDesktopBackground" = $true
-                        "DisableSystemAddonUpdate" = $true
-                        "DisableTelemetry" = $true
-                        "NoDefaultBookmarks" = $true
-                        "OverrideFirstRunPage" = ""
-                        "OverridePostUpdatePage" = ""
-                        "DontCheckDefaultBrowser" = $true
-                        "DisableAppUpdate" = $true
+                        "DisableSystemAddonUpdate"    = $true
+                        "DisableTelemetry"            = $true
+                        "NoDefaultBookmarks"          = $true
+                        "OverrideFirstRunPage"        = ""
+                        "OverridePostUpdatePage"      = ""
+                        "DontCheckDefaultBrowser"     = $true
+                        "DisableAppUpdate"            = $true
+                        "UserMessaging" = @{
+                            "WhatsNew"                = $false
+                            "ExtensionRecommendations" = $false
+                            "FeatureRecommendations"   = $false
+                            "UrlbarInterventions"      = $false
+                            "SkipOnboarding"           = $true
+                        }
                         "Homepage" = @{
-                            "URL" = "about:blank"
-                            "Locked" = $false
+                            "URL"       = "about:blank"
+                            "Locked"    = $false
                             "StartPage" = "none"
                         }
+                        "DisableFeedbackCommands"    = $true
+                        "DisablePrivateBrowsing"     = $false
+                        "DisableBuiltinPDFViewer"    = $false
                     }
                 } | ConvertTo-Json -Depth 5
                 
@@ -1331,7 +1354,7 @@ function Suppress-FirstRunExperiences {
                 )
                 
                 $userJsContent = @'
-// Disable first-run welcome screen
+// Disable first-run welcome screen and terms of use
 user_pref("browser.startup.homepage_override.mstone", "ignore");
 user_pref("startup.homepage_welcome_url", "");
 user_pref("startup.homepage_welcome_url.additional", "");
@@ -1343,6 +1366,27 @@ user_pref("browser.newtab.preload", false);
 user_pref("browser.newtabpage.enabled", false);
 user_pref("browser.newtabpage.enhanced", false);
 user_pref("browser.newtabpage.introShown", true);
+
+// Suppress Firefox welcome screen and terms of use dialog
+user_pref("browser.firstrun.show.localepicker", false);
+user_pref("browser.firstrun.show.uidiscovery", false);
+user_pref("datareporting.policy.firstRunURL", "");
+user_pref("toolkit.startup.max_resumed_crashes", -1);
+user_pref("browser.sessionstore.resume_from_crash", false);
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.rights.override", true);
+user_pref("datareporting.policy.dataSubmissionPolicyNotifiedTime", "1000000000000000");
+user_pref("datareporting.policy.dataSubmissionPolicyAcceptedVersion", 2);
+user_pref("datareporting.policy.dataSubmissionPolicyBypassNotification", true);
+user_pref("app.shield.optoutstudies.enabled", false);
+user_pref("datareporting.healthreport.uploadEnabled", false);
+user_pref("datareporting.policy.firstRunTime", "1000000000000000");
+user_pref("browser.bookmarks.restore_default_bookmarks", false);
+user_pref("browser.disableResetPrompt", true);
+user_pref("browser.onboarding.enabled", false);
+user_pref("browser.laterrun.enabled", false);
+user_pref("browser.aboutwelcome.enabled", false);
+user_pref("trailhead.firstrun.didSeeAboutWelcome", true);
 '@
                 
                 foreach ($profileDir in $firefoxProfileDirs) {
@@ -1538,7 +1582,7 @@ qt-notification=0
 </NotepadPlus>
 '@
                         $nppConfig | Out-File -FilePath $configPath -Encoding UTF8 -Force
-                    }
+                   
                 }
                 
                 Write-Host "Notepad++ first-run suppression configured" -ForegroundColor Green
