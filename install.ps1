@@ -2052,8 +2052,8 @@ function Write-TaskbarLayoutXml {
 
     $items = foreach ($lp in $LinkPaths) {
         $safe = $lp.Replace('&','&amp;').Replace('"','&quot;')
-        # FIX: avoid \"; use concatenation so quotes remain valid PowerShell
-        '  <DesktopApp DesktopApplicationLinkPath="' + $safe + '"/>'
+        # Use string formatting to avoid potential parsing issues
+        "  <DesktopApp DesktopApplicationLinkPath=`"$safe`"/>"
     }
 
     $content = $xmlHeader + "`r`n" + $xmlStart + "`r`n" + ($items -join "`r`n") + "`r`n" + $xmlEnd + "`r`n"
