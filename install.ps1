@@ -1582,7 +1582,7 @@ qt-notification=0
 </NotepadPlus>
 '@
                         $nppConfig | Out-File -FilePath $configPath -Encoding UTF8 -Force
-                   
+                    } 
                 }
                 
                 Write-Host "Notepad++ first-run suppression configured" -ForegroundColor Green
