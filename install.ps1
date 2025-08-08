@@ -1,3 +1,10 @@
+# Script: install.ps1
+# Purpose: Provision GuardMonitor, install required software, harden system, and disable auto-updates/first-run prompts.
+# Notes:
+# - Requires administrative privileges.
+# - Logs are written to %TEMP% with a timestamped filename via Start-Transcript.
+# - Functions provide safe helpers for registry, services, first-run suppression, and update hardening.
+
 #region Setup and initialization
 # Start transcript logging with timestamp for better tracking
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -22,6 +29,18 @@ if (-not (Test-IsAdministrator)) {
 $global:errorLog = @()
 
 # Function for better error logs
+<#
+.SYNOPSIS
+  Writes a standardized error entry to console and a global in-memory error log.
+.DESCRIPTION
+  Wraps error handling with timestamp, function name and optional ErrorRecord details.
+.PARAMETER FunctionName
+  Logical name of the caller used for tracing (e.g., Disable-ServiceSafely).
+.PARAMETER ErrorMessage
+  Human-friendly error message explaining the failure.
+.PARAMETER ErrorRecord
+  Optional PowerShell ErrorRecord; if provided, exception type/message will be appended.
+#>
 function Write-ErrorLog {
     param (
         [Parameter(Mandatory=$true)]
@@ -50,6 +69,16 @@ function Write-ErrorLog {
 
 #region Helper Functions
 # Function to safely disable a service
+<#
+.SYNOPSIS
+  Stops and disables a Windows service with robust error handling.
+.PARAMETER ServiceName
+  The service name (not display name).
+.PARAMETER DisplayName
+  Friendly name printed to console for user clarity.
+.PARAMETER NoStopOnError
+  When set, failures to stop do not abort disabling (best-effort mode).
+#>
 function Disable-ServiceSafely {
     param (
         [Parameter(Mandatory=$true)]
@@ -110,6 +139,14 @@ function Disable-ServiceSafely {
 }
 
 # Function to ensure registry path exists and properly handle errors
+<#
+.SYNOPSIS
+  Ensures a registry key path exists (creates if missing).
+.PARAMETER Path
+  The registry path (e.g., HKLM:\SOFTWARE\Policies\... ).
+.OUTPUTS
+  [bool] True when the path exists/was created successfully; otherwise False.
+#>
 function Ensure-RegistryPath {
     param (
         [Parameter(Mandatory=$true)]
@@ -160,6 +197,14 @@ try {
     Write-ErrorLog -FunctionName "FirewallConfiguration" -ErrorMessage $errorMsg -ErrorRecord $_
 }
 # Function to radically disable updates for specific applications
+<#
+.SYNOPSIS
+  Applies application-specific update prevention (services, tasks, files, and policies).
+.DESCRIPTION
+  Targets known updaters for supported apps. Non-destructive where possible, with logging.
+.PARAMETER PackageName
+  Chocolatey package id or app key handled by the switch block (e.g., firefox, vscode).
+#>
 function Disable-ApplicationUpdates {
     param (
         [Parameter(Mandatory=$true)]
@@ -862,7 +907,7 @@ try {
             "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\*update*"
         )
         
-        # Destroy update executables by replacing them with dummy files
+        # Destroy update executables by replacing them with dummy
         foreach ($executable in $updateExecutables) {
             if (Test-Path $executable) {
                 try {
@@ -1292,6 +1337,14 @@ catch {
 Write-Host "Suppressing first-run experiences for installed applications..." -ForegroundColor Cyan
 
 # Function to create default user profiles and suppress first-run dialogs
+<#
+.SYNOPSIS
+  Configures policies and user defaults to suppress welcome/first-run UX per application.
+.DESCRIPTION
+  Writes policy keys/files and opinionated defaults to reduce prompts on first launch.
+.PARAMETER ApplicationName
+  Logical application key (e.g., chrome, edge, firefox, vscode, vlc, 7zip).
+#>
 function Suppress-FirstRunExperiences {
     param (
         [Parameter(Mandatory=$true)]
