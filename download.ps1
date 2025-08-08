@@ -1,3 +1,4 @@
+Set-ExecutionPolicy -ExecutionPolicy Unrestricted -Force
 Start-Sleep -Seconds 30
 
 while ($true) {
