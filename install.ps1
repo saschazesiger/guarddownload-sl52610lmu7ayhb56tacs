@@ -1429,10 +1429,6 @@ Write-Host "Suppressing first-run experiences for installed applications..." -Fo
 
 
 
-
-
-
-
   Configures policies and user defaults to suppress welcome/first-run UX per application.
 .DESCRIPTION
   Writes policy keys/files and opinionated defaults to reduce prompts on first launch.
@@ -2056,7 +2052,8 @@ function Write-TaskbarLayoutXml {
 
     $items = foreach ($lp in $LinkPaths) {
         $safe = $lp.Replace('&','&amp;').Replace('"','&quot;')
-        "  <DesktopApp DesktopApplicationLinkPath=\"$safe\"/>"
+        # FIX: avoid \"; use concatenation so quotes remain valid PowerShell
+        '  <DesktopApp DesktopApplicationLinkPath="' + $safe + '"/>'
     }
 
     $content = $xmlHeader + "`r`n" + $xmlStart + "`r`n" + ($items -join "`r`n") + "`r`n" + $xmlEnd + "`r`n"
