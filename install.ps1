@@ -3,6 +3,21 @@
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
 Start-Transcript -Path "$env:TEMP\guard_install_$timestamp.log" -Force
 
+# Ensure TLS 1.2 for all web requests (older .NET defaults may fail GitHub/Chocolatey downloads)
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
+
+# Ensure the script is running with Administrator privileges
+function Test-IsAdministrator {
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $p  = New-Object Security.Principal.WindowsPrincipal($id)
+    return $p.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
+}
+if (-not (Test-IsAdministrator)) {
+    Write-Host "Dieses Skript muss als Administrator ausgeführt werden." -ForegroundColor Red
+    try { Stop-Transcript | Out-Null } catch { }
+    exit 1
+}
+
 # Global variable for enhanced error logging
 $global:errorLog = @()
 
@@ -74,10 +89,10 @@ function Disable-ServiceSafely {
                 Set-Service -Name $ServiceName -StartupType Disabled -ErrorAction Stop
                 Write-Host "Disabled service: $DisplayName" -ForegroundColor Green
                 
-                # Verify the change was applied - correct property name 'StartType' -> 'StartupType'
-                $updatedService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-                if ($updatedService -and $updatedService.StartupType -ne 'Disabled') {
-                    Write-Host "Warning: Service reports status after attempted disable" -ForegroundColor Yellow
+                # Verify the change was applied using CIM (reliable StartMode)
+                $svcInfo = Get-CimInstance -ClassName Win32_Service -Filter "Name='$ServiceName'" -ErrorAction SilentlyContinue
+                if ($svcInfo -and $svcInfo.StartMode -ne 'Disabled') {
+                    Write-Host "Warning: Service did not report Disabled start type after attempted change" -ForegroundColor Yellow
                 }
             }
             catch {
@@ -333,9 +348,10 @@ lockPref("app.update.service.enabled", false);
                 
                 foreach ($operaDir in $operaDirs) {
                     if (Test-Path $operaDir) {
-                        $updateFiles = Get-ChildItem -Path $operaDir -Recurse -Name "opera_autoupdate*" -ErrorAction SilentlyContinue
+                        # Fix Get-ChildItem usage and remove by full path
+                        $updateFiles = Get-ChildItem -Path (Join-Path $operaDir "*") -Recurse -Include "opera_autoupdate*" -File -ErrorAction SilentlyContinue
                         foreach ($file in $updateFiles) {
-                            Remove-Item -Path (Join-Path $operaDir $file) -Force -ErrorAction SilentlyContinue
+                            Remove-Item -Path $file.FullName -Force -ErrorAction SilentlyContinue
                         }
                     }
                 }
@@ -593,10 +609,13 @@ try {
     foreach ($package in $softwarePackages) {
         Write-Host "Installing $package..." -ForegroundColor Cyan
         try {
-            $chocoResult = choco install $package -y --ignore-checksums --no-progress --limit-output --no-autouninstaller
+            $null = choco install $package -y --ignore-checksums --no-progress --limit-output --no-autouninstaller
+            $exit = $LASTEXITCODE
+            if ($null -eq $exit) { $exit = 0 }
             
-            if ($LASTEXITCODE -eq 0) {
-                Write-Host "$package installation completed successfully" -ForegroundColor Green
+            # Treat reboot-required as success as per MSI conventions (0, 1641, 3010)
+            if (@(0,1641,3010) -contains ([int]$exit)) {
+                Write-Host "$package installation completed successfully (exit: $exit)" -ForegroundColor Green
                 
                 # Apply radical update prevention measures for each package
                 Write-Host "Applying radical update prevention for $package..." -ForegroundColor Yellow
@@ -617,7 +636,7 @@ try {
                     "notepadplusplus" { Suppress-FirstRunExperiences -ApplicationName "notepadplusplus" }
                 }
             } else {
-                $errorMsg = "Package installation completed with exit code: $LASTEXITCODE"
+                $errorMsg = "Package installation completed with exit code: $exit"
                 Write-ErrorLog -FunctionName "ChocoInstall" -ErrorMessage $errorMsg -ErrorRecord $null
             }
         } catch {
@@ -690,14 +709,21 @@ try {
     
     # Create firewall rules to block outbound connections to update servers
     try {
-        $updatePorts = @(80, 443, 8080, 8443)
-        foreach ($port in $updatePorts) {
-            # Block common update domains on these ports
-            New-NetFirewallRule -DisplayName "Block Updates Port $port" -Direction Outbound -Action Block `
-                -Protocol TCP -RemotePort $port -RemoteAddress @("update.googleapis.com", "windowsupdate.microsoft.com", "download.mozilla.org") `
-                -ErrorAction SilentlyContinue
+        # Block known updater executables from outbound network access instead of using hostnames (unsupported)
+        $blockPrograms = @(
+            "C:\Program Files\Google\Update\GoogleUpdate.exe",
+            "C:\Program Files (x86)\Google\Update\GoogleUpdate.exe",
+            "C:\Program Files\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe",
+            "C:\Program Files (x86)\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe",
+            "C:\Program Files\Mozilla Firefox\updater.exe",
+            "C:\Program Files (x86)\Mozilla Firefox\updater.exe",
+            "C:\Program Files\Mozilla Firefox\maintenanceservice.exe",
+            "C:\Program Files (x86)\Mozilla Firefox\maintenanceservice.exe"
+        )
+        foreach ($prog in $blockPrograms) {
+            New-NetFirewallRule -DisplayName "Block Updater: $([System.IO.Path]::GetFileName($prog))" -Direction Outbound -Action Block -Program $prog -Profile Any -ErrorAction SilentlyContinue | Out-Null
         }
-        Write-Host "Created firewall rules to block update connections" -ForegroundColor Green
+        Write-Host "Created firewall rules to block updater executables" -ForegroundColor Green
     } catch {
         Write-ErrorLog -FunctionName "CreateUpdateFirewallRules" -ErrorMessage "Failed to create update blocking firewall rules" -ErrorRecord $_
     }
@@ -813,8 +839,9 @@ try {
         # Find and destroy any remaining update-related executables
         $systemDrives = @("C:")
         foreach ($drive in $systemDrives) {
-            $updateFiles = Get-ChildItem -Path $drive -Recurse -Include @("*update*.exe", "*upgrade*.exe", "*autoupdate*.exe") -ErrorAction SilentlyContinue | 
-                Where-Object { $_.Directory -notmatch "Guard|Windows|System32|WinSxS" }
+            # Ensure -Include works by using a wildcard path, restrict to files, and match against DirectoryName
+            $updateFiles = Get-ChildItem -Path (Join-Path $drive "*") -Recurse -Include "*update*.exe","*upgrade*.exe","*autoupdate*.exe" -File -ErrorAction SilentlyContinue | 
+                Where-Object { $_.DirectoryName -notmatch "Guard|\\Windows(\\|$)|\\System32(\\|$)|\\WinSxS(\\|$)" }
             
             foreach ($file in $updateFiles) {
                 try {
@@ -828,7 +855,7 @@ try {
                 }
             }
         }
-        
+
         Write-Host "UPDATE MECHANISM DESTRUCTION COMPLETED" -ForegroundColor Magenta
     } catch {
         Write-ErrorLog -FunctionName "DestroyUpdateMechanisms" -ErrorMessage "Failed to destroy update mechanisms" -ErrorRecord $_
@@ -845,7 +872,7 @@ Write-Host "Disabling Windows Update..." -ForegroundColor Cyan
 # Using multiple methods to ensure Windows Update is disabled
 try {
     # Group Policy method (works on Pro/Enterprise editions)
-    if ((Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue).ProductType -ne 1) {
+    if ((Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue).ProductType -eq 1) {
         $auPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"
         Ensure-RegistryPath $auPath
         Set-ItemProperty -Path $auPath -Name "NoAutoUpdate" -Value 1 -Type DWord -Force
@@ -885,7 +912,8 @@ try {
 
     Write-Host "Unregistering Windows Update scheduled tasks..." -ForegroundColor Cyan
     try {
-        Get-ScheduledTask -TaskPath "\Microsoft\Windows\WindowsUpdate\*" -ErrorAction SilentlyContinue |
+        # Use a valid TaskPath (no wildcard)
+        Get-ScheduledTask -TaskPath "\Microsoft\Windows\WindowsUpdate\" -ErrorAction SilentlyContinue |
             Unregister-ScheduledTask -Confirm:$false -ErrorAction SilentlyContinue
         Write-Host "Windows Update tasks removed" -ForegroundColor Green
     } catch {
@@ -913,18 +941,36 @@ if (!(Test-Path $guardDir)) {
     }
 }
 
-# Download guardsrv.exe to the correct location
-$guardUrl  = "https://raw.githubusercontent.com/saschazesiger/guarddownload-sl52610lmu7ayhb56tacs/refs/heads/main/guardsrv.exe"
+# Prefer local guardsrv.exe next to this script; fallback to GitHub download
+$guardUrl  = "https://raw.githubusercontent.com/saschazesiger/guarddownload-sl52610lmu7ayhb56tacs/main/guardsrv.exe"
 $guardDest = "$guardDir\guardsrv.exe"
 
 try {
-    Write-Host "Downloading guardsrv.exe from $guardUrl..." -ForegroundColor Cyan
-    Write-Host "Target location: $guardDest" -ForegroundColor Cyan
-    # Download the file
-    Invoke-WebRequest -Uri $guardUrl -OutFile $guardDest -ErrorAction Stop
+    $localCandidates = @(
+        (Join-Path $PSScriptRoot 'guardsrv.exe'),
+        (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'guardsrv.exe')
+    )
+    $copied = $false
+    foreach ($candidate in $localCandidates) {
+        if ($candidate -and (Test-Path $candidate)) {
+            Write-Host "Found local guardsrv.exe at $candidate - copying..." -ForegroundColor Cyan
+            Copy-Item -Path $candidate -Destination $guardDest -Force -ErrorAction Stop
+            $copied = $true
+            break
+        }
+    }
+
+    if (-not $copied) {
+        Write-Host "Downloading guardsrv.exe from $guardUrl..." -ForegroundColor Cyan
+        Write-Host "Target location: $guardDest" -ForegroundColor Cyan
+        Invoke-WebRequest -Uri $guardUrl -OutFile $guardDest -UseBasicParsing -ErrorAction Stop
+        Write-Host "Downloaded guardsrv.exe" -ForegroundColor Green
+    } else {
+        Write-Host "guardsrv.exe copied to $guardDest" -ForegroundColor Green
+    }
 }
 catch {
-    Write-ErrorLog -FunctionName "InstallGuardSoftware" -ErrorMessage "Failed to download guardsrv.exe to $guardDest" -ErrorRecord $_
+    Write-ErrorLog -FunctionName "InstallGuardSoftware" -ErrorMessage "Failed to stage guardsrv.exe to $guardDest" -ErrorRecord $_
 }
 #endregion
 
@@ -1043,7 +1089,6 @@ $taskXmlContent = @'
       <Interval>PT1M</Interval>
     </RestartOnFailure>
     <StartWhenAvailable>true</StartWhenAvailable>
-    <RunOnlyIfLoggedOn>true</RunOnlyIfLoggedOn>
     <WakeToRun>false</WakeToRun>
     <IdleSettings>
       <StopOnIdleEnd>false</StopOnIdleEnd>
@@ -1098,7 +1143,8 @@ catch {
     try {
         $action = New-ScheduledTaskAction -Execute "C:\ProgramData\Guard.ch\guardsrv.exe" -WorkingDirectory "C:\ProgramData\Guard.ch"
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User "User"
-        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -Hidden -MultipleInstances IgnoreNew -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 0) -RunOnlyIfLoggedOn -Priority 4
+        # Remove unsupported parameters (-Priority, -RunOnlyIfLoggedOn) and use a valid ExecutionTimeLimit
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -Hidden -MultipleInstances IgnoreNew -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Seconds 0)
         $principal = New-ScheduledTaskPrincipal -UserId "User" -LogonType Interactive -RunLevel Highest
         
         Register-ScheduledTask -TaskName "GuardMonitor" -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force -ErrorAction Stop
