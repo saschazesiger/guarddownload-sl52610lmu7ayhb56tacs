@@ -1427,6 +1427,12 @@ Write-Host "Suppressing first-run experiences for installed applications..." -Fo
 
 
 
+
+
+
+
+
+
   Configures policies and user defaults to suppress welcome/first-run UX per application.
 .DESCRIPTION
   Writes policy keys/files and opinionated defaults to reduce prompts on first launch.
@@ -1974,6 +1980,114 @@ privs.warn_if_no_npcap: FALSE
             }
         }
     }
+}
+#endregion
+
+#region Pin browsers to taskbar
+Write-Host "Pinning browsers to the taskbar..." -ForegroundColor Cyan
+
+function Get-BrowserTaskbarLinkPaths {
+    [OutputType([string[]])]
+    param()
+
+    $patterns = @(
+        '*Microsoft Edge.lnk',
+        '*Google Chrome.lnk',
+        '*Mozilla Firefox.lnk',
+        '*Firefox.lnk',
+        '*Brave*.lnk',
+        '*Opera*.lnk',
+        '*Vivaldi*.lnk',
+        '*Chromium*.lnk'
+    )
+
+    $paths = @()
+    $startMenuDirs = @(
+        "$env:ProgramData\Microsoft\Windows\Start Menu\Programs",
+        "$env:APPDATA\Microsoft\Windows\Start Menu\Programs"
+    )
+
+    foreach ($dir in $startMenuDirs) {
+        if (Test-Path $dir) {
+            foreach ($pat in $patterns) {
+                try {
+                    $found = Get-ChildItem -Path $dir -Filter $pat -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName -ErrorAction SilentlyContinue
+                    if ($found) { $paths += $found }
+                } catch {}
+            }
+        }
+    }
+
+    # Deduplicate preserving order
+    $hash = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $unique = @()
+    foreach ($p in $paths) { if ($hash.Add($p)) { $unique += $p } }
+
+    if (-not $unique -or $unique.Count -eq 0) { return @() }
+
+    # Opinionated ordering: Edge, Chrome, Firefox, Brave, Opera, Vivaldi, Chromium
+    $ordered = $unique | Sort-Object {
+        $n = $_.ToLower()
+        if     ($n -match 'edge')     { 10 }
+        elseif ($n -match 'google' -or ($n -match 'chrome' -and $n -notmatch 'chromium')) { 20 }
+        elseif ($n -match 'firefox')  { 30 }
+        elseif ($n -match 'brave')    { 40 }
+        elseif ($n -match 'opera')    { 50 }
+        elseif ($n -match 'vivaldi')  { 60 }
+        elseif ($n -match 'chromium') { 70 }
+        else { 999 }
+    }
+
+    return $ordered
+}
+
+function Write-TaskbarLayoutXml {
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory=$true)][string[]]$LinkPaths,
+        [Parameter(Mandatory=$true)][string]$Destination
+    )
+
+    if (-not $LinkPaths -or $LinkPaths.Count -eq 0) { return $false }
+
+    $xmlHeader = '<?xml version="1.0" encoding="utf-8"?>'
+    $xmlStart  = '<TaskbarLayout><TaskbarPinList>'
+    $xmlEnd    = '</TaskbarPinList></TaskbarLayout>'
+
+    $items = foreach ($lp in $LinkPaths) {
+        $safe = $lp.Replace('&','&amp;').Replace('"','&quot;')
+        "  <DesktopApp DesktopApplicationLinkPath=\"$safe\"/>"
+    }
+
+    $content = $xmlHeader + "`r`n" + $xmlStart + "`r`n" + ($items -join "`r`n") + "`r`n" + $xmlEnd + "`r`n"
+
+    $destDir = Split-Path -Path $Destination -Parent
+    if (!(Test-Path $destDir)) { New-Item -Path $destDir -ItemType Directory -Force | Out-Null }
+
+    $content | Out-File -FilePath $Destination -Encoding utf8 -Force
+    return $true
+}
+
+try {
+    $browserLinks = Get-BrowserTaskbarLinkPaths
+    if ($browserLinks -and $browserLinks.Count -gt 0) {
+        $currentUserXml = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\Shell\TaskbarLayoutModification.xml'
+        $defaultUserXml = 'C:\Users\Default\AppData\Local\Microsoft\Windows\Shell\TaskbarLayoutModification.xml'
+
+        $okCurrent = Write-TaskbarLayoutXml -LinkPaths $browserLinks -Destination $currentUserXml
+        $okDefault = Write-TaskbarLayoutXml -LinkPaths $browserLinks -Destination $defaultUserXml
+
+        Write-Host ("Taskbar layout written. Current user: {0}, Default profile: {1}" -f $okCurrent, $okDefault) -ForegroundColor Green
+
+        # Try to restart Explorer (reboot is also scheduled later)
+        try { Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue } catch {}
+    }
+    else {
+        Write-Host "No browser shortcuts found to pin" -ForegroundColor Yellow
+    }
+}
+catch {
+    Write-ErrorLog -FunctionName "TaskbarPinning" -ErrorMessage ("Failed to pin browsers to the taskbar: " + $_.Exception.Message) -ErrorRecord $_
 }
 #endregion
 
