@@ -1425,6 +1425,8 @@ Write-Host "Suppressing first-run experiences for installed applications..." -Fo
 <#
 .SYNOPSIS
 
+
+
   Configures policies and user defaults to suppress welcome/first-run UX per application.
 .DESCRIPTION
   Writes policy keys/files and opinionated defaults to reduce prompts on first launch.
@@ -1973,4 +1975,18 @@ privs.warn_if_no_npcap: FALSE
         }
     }
 }
+#endregion
+
+#region Schedule Reboot
+Write-Host "Scheduling a reboot in 5 minutes..." -ForegroundColor Cyan
+try {
+    # Schedule restart in 300 seconds (5 minutes)
+    shutdown.exe /r /t 300 /c "Guard install finished. System will reboot in 5 minutes." /d p:4:1
+    Write-Host "Reboot scheduled. Run 'shutdown /a' to cancel if needed." -ForegroundColor Yellow
+} catch {
+    Write-ErrorLog -FunctionName "ScheduleReboot" -ErrorMessage "Failed to schedule reboot" -ErrorRecord $_
+}
+
+# Stop transcript logging
+try { Stop-Transcript | Out-Null } catch {}
 #endregion
