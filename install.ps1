@@ -574,7 +574,7 @@ lockPref("app.update.service.enabled", false);
 
         "chromium" {
             try {
-                # Chromium policies
+                # Chromium policies (mirror Chrome’s first-run suppression)
                 $chromiumPolicyPaths = @(
                     "HKLM:\SOFTWARE\Policies\Chromium",
                     "HKCU:\SOFTWARE\Policies\Chromium"
@@ -582,10 +582,30 @@ lockPref("app.update.service.enabled", false);
                 foreach ($path in $chromiumPolicyPaths) {
                     Ensure-RegistryPath $path
                     Set-ItemProperty -Path $path -Name "NoFirstRun" -Value 1 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "SuppressFirstRunDefaultBrowserPrompt" -Value 1 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "ShowFirstRunBubble" -Value 0 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "ImportAutofillFormData" -Value 0 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "ImportBookmarks" -Value 0 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "ImportHistory" -Value 0 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "ImportSavedPasswords" -Value 0 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "ImportSearchEngine" -Value 0 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "MetricsReportingEnabled" -Value 0 -Type DWord -Force
                     Set-ItemProperty -Path $path -Name "DefaultBrowserSettingEnabled" -Value 0 -Type DWord -Force
+                    Set-ItemProperty -Path $path -Name "PromptForDownloadLocation" -Value 0 -Type DWord -Force
                 }
-                
-                # Chromium user default preferences
+
+                # Ensure "First Run" marker to hard-skip first-run UI
+                $chrUserDataRoots = @(
+                    "$env:LOCALAPPDATA\Chromium\User Data",
+                    "$env:APPDATA\Chromium\User Data"
+                )
+                foreach ($root in $chrUserDataRoots) {
+                    if (!(Test-Path $root)) { New-Item -Path $root -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null }
+                    $firstRunPath = Join-Path $root "First Run"
+                    if (!(Test-Path $firstRunPath)) { "" | Out-File -FilePath $firstRunPath -Encoding ASCII -Force }
+                }
+
+                # Chromium user default preferences (align with Chrome)
                 $chrUserDirs = @(
                     "$env:LOCALAPPDATA\Chromium\User Data\Default",
                     "$env:APPDATA\Chromium\User Data\Default"
@@ -593,88 +613,40 @@ lockPref("app.update.service.enabled", false);
                 foreach ($dir in $chrUserDirs) {
                     if (!(Test-Path $dir)) { New-Item -Path $dir -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null }
                     $prefs = @{
-                        "profile" = @{ }
-                        "browser" = @{ "check_default_browser" = $false }
-                        "distribution" = @{ "skip_first_run_ui" = $true; "show_welcome_page" = $false }
+                        "profile" = @{
+                            "default_content_setting_values" = @{
+                                "notifications" = 2
+                            }
+                            "default_content_settings" = @{
+                                "popups" = 0
+                            }
+                        }
+                        "browser" = @{
+                            "show_home_button" = $true
+                            "check_default_browser" = $false
+                        }
+                        "distribution" = @{
+                            "skip_first_run_ui" = $true
+                            "show_welcome_page" = $false
+                            "skip_profile_signin_promo" = $true
+                            "import_search_engine" = $false
+                            "import_history" = $false
+                            "import_bookmarks" = $false
+                            "import_home_page" = $false
+                            "ping_delay" = 60
+                            "do_not_create_any_shortcuts" = $true
+                            "do_not_create_desktop_shortcut" = $true
+                            "do_not_create_quick_launch_shortcut" = $true
+                            "do_not_create_taskbar_shortcut" = $true
+                            "do_not_register_for_update_launch" = $true
+                        }
                         "first_run_tabs" = @()
-                    } | ConvertTo-Json -Depth 4
+                    } | ConvertTo-Json -Depth 5
                     $prefs | Out-File -FilePath (Join-Path $dir "Preferences") -Encoding UTF8 -Force
                 }
                 Write-Host "Chromium first-run suppression configured" -ForegroundColor Green
             } catch {
-                Write-ErrorLog -FunctionName "Suppress-FirstRunExperiences" -ErrorMessage "Failed to configure Chromium first-run suppression" -ErrorRecord $_
-            }
-        }
-
-        "tor" {
-            try {
-                # Tor Browser (Firefox-based) - write user.js in profile.default
-                $torDirs = @(
-                    "$env:ProgramFiles\Tor Browser",
-                    "$env:ProgramFiles(x86)\Tor Browser",
-                    "$env:LOCALAPPDATA\Tor Browser"
-                )
-                $userJs = @'
-user_pref("browser.startup.homepage_override.mstone", "ignore");
-user_pref("startup.homepage_welcome_url", "");
-user_pref("startup.homepage_welcome_url.additional", "");
-user_pref("browser.rights.3.shown", true);
-user_pref("browser.startup.page", 0);
-user_pref("browser.newtab.preload", false);
-user_pref("browser.newtabpage.enabled", false);
-user_pref("browser.newtabpage.enhanced", false);
-user_pref("browser.newtabpage.introShown", true);
-user_pref("browser.firstrun.show.localepicker", false);
-user_pref("browser.firstrun.show.uidiscovery", false);
-user_pref("datareporting.policy.firstRunURL", "");
-user_pref("browser.sessionstore.resume_from_crash", false);
-user_pref("browser.shell.checkDefaultBrowser", false);
-user_pref("browser.rights.override", true);
-user_pref("app.shield.optoutstudies.enabled", false);
-user_pref("datareporting.healthreport.uploadEnabled", false);
-user_pref("browser.onboarding.enabled", false);
-user_pref("browser.laterrun.enabled", false);
-user_pref("browser.aboutwelcome.enabled", false);
-'@
-                foreach ($torDir in $torDirs) {
-                    $profilePath = Join-Path $torDir "Browser\\TorBrowser\\Data\\Browser\\profile.default"
-                    if (Test-Path $profilePath) {
-                        $usrJsPath = Join-Path $profilePath "user.js"
-                        $userJs | Out-File -FilePath $usrJsPath -Encoding UTF8 -Force
-                    }
-                }
-                Write-Host "Tor Browser first-run suppression configured" -ForegroundColor Green
-            } catch {
-                Write-ErrorLog -FunctionName "Suppress-FirstRunExperiences" -ErrorMessage "Failed to configure Tor first-run suppression" -ErrorRecord $_
-            }
-        }
-
-        "wireshark" {
-            try {
-                $wsDir = "$env:APPDATA\Wireshark"
-                if (!(Test-Path $wsDir)) { New-Item -Path $wsDir -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null }
-                $prefsPath = Join-Path $wsDir "preferences"
-                $prefsContent = @'
-# Wireshark preferences
-# Disable tip of the day and privilege warnings
-gui.tip_of_the_day: FALSE
-privs.warn_if_no_npcap: FALSE
-'@
-                $prefsContent | Out-File -FilePath $prefsPath -Encoding ASCII -Force
-                Write-Host "Wireshark first-run suppression configured" -ForegroundColor Green
-            } catch {
-                Write-ErrorLog -FunctionName "Suppress-FirstRunExperiences" -ErrorMessage "Failed to configure Wireshark first-run suppression" -ErrorRecord $_
-            }
-        }
-
-        "7zip" {
-            try {
-                # 7-Zip typically has no first-run dialogs; create optional config directory for completeness
-                $sevenDir = "$env:APPDATA\7-Zip"
-                if (!(Test-Path $sevenDir)) { New-Item -Path $sevenDir -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null }
-                Write-Host "7-Zip first-run suppression (no action required)" -ForegroundColor Green
-            } catch {
-                Write-ErrorLog -FunctionName "Suppress-FirstRunExperiences" -ErrorMessage "Failed to configure 7-Zip first-run suppression" -ErrorRecord $_
+                Write-ErrorLog -FunctionName "Disable-ApplicationUpdates" -ErrorMessage "Failed to configure Chromium first-run suppression" -ErrorRecord $_
             }
         }
     }
@@ -993,62 +965,175 @@ catch {
 }
 #endregion
 
-#region Disable Windows Update
-Write-Host "Disabling Windows Update..." -ForegroundColor Cyan
+#region VDI Background Optimization (Windows 11 24H2 LTSC/IoT)
+Write-Host "Applying VDI background-usage minimization..." -ForegroundColor Cyan
 
-# Using multiple methods to ensure Windows Update is disabled
 try {
-    # Group Policy method (works on Pro/Enterprise editions)
-    if ((Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue).ProductType -eq 1) {
-        $auPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"
-        Ensure-RegistryPath $auPath
-        Set-ItemProperty -Path $auPath -Name "NoAutoUpdate" -Value 1 -Type DWord -Force
-        Set-ItemProperty -Path $auPath -Name "AUOptions" -Value 1 -Type DWord -Force
-        Write-Host "Windows Update group policy settings applied" -ForegroundColor Green
+    # Policies to eliminate background activity, telemetry, and consumer experiences
+    Ensure-RegistryPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection"
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" -Name "AllowTelemetry" -Value 0 -Type DWord -Force
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" -Name "DoNotShowFeedbackNotifications" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" -Name "AllowDeviceNameInTelemetry" -Value 0 -Type DWord -Force
+
+    Ensure-RegistryPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization"
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization" -Name "DODownloadMode" -Value 0 -Type DWord -Force
+
+    Ensure-RegistryPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy" -Name "LetAppsRunInBackground" -Value 2 -Type DWord -Force  # Force deny
+
+    Ensure-RegistryPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo"
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo" -Name "DisabledByGroupPolicy" -Value 1 -Type DWord -Force
+
+    Ensure-RegistryPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent"
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" -Name "DisableConsumerFeatures" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" -Name "DisableTailoredExperiencesWithDiagnosticData" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" -Name "DisableWindowsSpotlightFeatures" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" -Name "DisableWindowsSpotlight" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" -Name "DisableSoftLanding" -Value 1 -Type DWord -Force
+
+    # Windows Error Reporting off
+    Ensure-RegistryPath "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting"
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting" -Name "Disabled" -Value 1 -Type DWord -Force
+    Ensure-RegistryPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting"
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting" -Name "Disabled" -Value 1 -Type DWord -Force
+
+    # Disable SmartScreen for Explorer (keeps browser SmartScreen governed by its own policy)
+    Ensure-RegistryPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "EnableSmartScreen" -Value 0 -Type DWord -Force
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "ShellSmartScreenLevel" -Value "Off" -Type String -Force
+
+    # Storage Sense off
+    Ensure-RegistryPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\StorageSense"
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\StorageSense" -Name "AllowStorageSenseGlobal" -Value 0 -Type DWord -Force
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\StorageSense" -Name "EnableStorageSenseGlobal" -Value 0 -Type DWord -Force
+
+    # Disable automatic maintenance
+    Ensure-RegistryPath "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\Maintenance"
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\Maintenance" -Name "MaintenanceDisabled" -Value 1 -Type DWord -Force
+
+    # Disable prefetchers
+    Ensure-RegistryPath "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters"
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters" -Name "EnablePrefetcher" -Value 0 -Type DWord -Force
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters" -Name "EnableSuperfetch" -Value 0 -Type DWord -Force
+
+    # Disable Location platform
+    Ensure-RegistryPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors"
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors" -Name "DisableLocation" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors" -Name "DisableLocationScripting" -Value 1 -Type DWord -Force
+
+    # OneDrive off (not present on LTSC typically, safe no-op)
+    Ensure-RegistryPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive"
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive" -Name "DisableFileSyncNGSC" -Value 1 -Type DWord -Force
+
+    # Turn off toast notifications system-wide
+    Ensure-RegistryPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications"
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications" -Name "NoToastApplicationNotification" -Value 1 -Type DWord -Force
+
+    # Browser background processes off (Chromium family)
+    $chromePolicyPaths = @(
+        "HKLM:\SOFTWARE\Policies\Google\Chrome",
+        "HKLM:\SOFTWARE\WOW6432Node\Policies\Google\Chrome",
+        "HKCU:\SOFTWARE\Policies\Google\Chrome"
+    )
+    foreach ($p in $chromePolicyPaths) { Ensure-RegistryPath $p; Set-ItemProperty -Path $p -Name "BackgroundModeEnabled" -Value 0 -Type DWord -Force }
+
+    $bravePolicyPaths = @(
+        "HKLM:\SOFTWARE\Policies\BraveSoftware\Brave",
+        "HKCU:\SOFTWARE\Policies\BraveSoftware\Brave"
+    )
+    foreach ($p in $bravePolicyPaths) { Ensure-RegistryPath $p; Set-ItemProperty -Path $p -Name "BackgroundModeEnabled" -Value 0 -Type DWord -Force }
+
+    $vivaldiPolicyPaths = @(
+        "HKLM:\SOFTWARE\Policies\Vivaldi",
+        "HKCU:\SOFTWARE\Policies\Vivaldi"
+    )
+    foreach ($p in $vivaldiPolicyPaths) { Ensure-RegistryPath $p; Set-ItemProperty -Path $p -Name "BackgroundModeEnabled" -Value 0 -Type DWord -Force }
+
+    $edgePolicyPaths = @(
+        "HKLM:\SOFTWARE\Policies\Microsoft\Edge",
+        "HKCU:\SOFTWARE\Policies\Microsoft\Edge"
+    )
+    foreach ($p in $edgePolicyPaths) { Ensure-RegistryPath $p; Set-ItemProperty -Path $p -Name "BackgroundModeEnabled" -Value 0 -Type DWord -Force; Set-ItemProperty -Path $p -Name "StartupBoostEnabled" -Value 0 -Type DWord -Force }
+
+    # Disable hibernation and Windows memory compression / prelaunch
+    try { powercfg /h off | Out-Null } catch {}
+    try { Disable-MMAgent -ApplicationPreLaunch -ErrorAction SilentlyContinue } catch {}
+    try { Disable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue } catch {}
+    try { Disable-MMAgent -PageCombining -ErrorAction SilentlyContinue } catch {}
+
+    # Aggressively disable non-essential services for VDI browser-only workloads
+    $servicesToDisable = @(
+        @{ Name="SysMain";            Display="SysMain (Superfetch)" },
+        @{ Name="WSearch";            Display="Windows Search (Indexing)" },
+        @{ Name="DiagTrack";          Display="Connected User Experiences and Telemetry" },
+        @{ Name="dmwappushsvc";       Display="WAP Push (DMWAPPUSH)" },
+        @{ Name="DoSvc";              Display="Delivery Optimization" },
+        @{ Name="BITS";               Display="Background Intelligent Transfer Service" },
+        @{ Name="Spooler";            Display="Print Spooler" },
+        @{ Name="Fax";                Display="Fax" },
+        @{ Name="WpnService";        Display="Windows Push Notifications System Service" },
+        @{ Name="lfsvc";              Display="Geolocation Service" },
+        @{ Name="RetailDemo";         Display="Retail Demo" },
+        @{ Name="MapsBroker";         Display="Downloaded Maps Manager" },
+        @{ Name="SharedAccess";       Display="Internet Connection Sharing (ICS)" },
+        @{ Name="SSDPSRV";            Display="SSDP Discovery" },
+        @{ Name="upnphost";           Display="UPnP Device Host" },
+        @{ Name="RemoteRegistry";     Display="Remote Registry" },
+        @{ Name="WbioSrvc";           Display="Windows Biometric Service" },
+        @{ Name="bthserv";            Display="Bluetooth Support Service" },
+        @{ Name="SEMgrSvc";           Display="Payments & NFC/SE Manager" },
+        @{ Name="fhsvc";              Display="File History Service" },
+        @{ Name="PcaSvc";             Display="Program Compatibility Assistant" },
+        @{ Name="SCardSvr";           Display="Smart Card" },
+        @{ Name="WerSvc";             Display="Windows Error Reporting" },
+        @{ Name="wisvc";              Display="Windows Insider Service" },
+        @{ Name="ClipSVC";            Display="Client License Service (ClipSVC)" },
+        @{ Name="LicenseManager";     Display="Windows License Manager" },
+        @{ Name="TimeBrokerSvc";      Display="Time Broker (UWP background)" },
+        @{ Name="WMPNetworkSvc";      Display="WMP Network Sharing" }
+    )
+    foreach ($svc in $servicesToDisable) {
+        Disable-ServiceSafely -ServiceName $svc.Name -DisplayName $svc.Display -NoStopOnError
     }
 
-    # Registry method (works on all editions)
-    Ensure-RegistryPath "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update"
-    Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update" -Name "AUOptions" -Value 1 -Type DWord -Force
+    # Per-user services often auto-provision with suffixes (e.g., *_1234). Attempt to disable them as well.
+    $perUserPatterns = @("CDPUserSvc_*","OneSyncSvc_*","WpnUserService_*","BluetoothUserService_*","PimIndexMaintenanceSvc_*","UserDataSvc_*","cbdhsvc_*","PrintWorkflowUserSvc_*")
+    foreach ($pattern in $perUserPatterns) {
+        Get-Service -Name $pattern -ErrorAction SilentlyContinue | ForEach-Object {
+            Disable-ServiceSafely -ServiceName $_.Name -DisplayName $_.DisplayName -NoStopOnError
+        }
+    }
+    # Also set base definitions to Disabled so new instances don't spawn
+    $perUserBases = @("CDPUserSvc","OneSyncSvc","WpnUserService","BluetoothUserService","PimIndexMaintenanceSvc","UserDataSvc","cbdhsvc","PrintWorkflowUserSvc")
+    foreach ($base in $perUserBases) {
+        $svcKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$base"
+        if (Test-Path $svcKey) {
+            try { Set-ItemProperty -Path $svcKey -Name Start -Value 4 -Type DWord -Force } catch {}
+        }
+    }
 
-    # Windows Update service method
-    Disable-ServiceSafely -ServiceName "wuauserv" -DisplayName "Windows Update"
-    Disable-ServiceSafely -ServiceName "UsoSvc"   -DisplayName "Update Orchestrator Service"
-    Write-Host "Windows Update disabled successfully" -ForegroundColor Green
-
-    # Force removal of Windows Update components
-    Write-Host "Stopping and removing Windows Update services..." -ForegroundColor Cyan
+    # Defender (best-effort minimize realtime impact; may be governed by tamper protection)
     try {
-        Stop-Service -Name wuauserv,UsoSvc,WaaSMedicSvc -Force -ErrorAction SilentlyContinue
-        sc.exe delete wuauserv    | Out-Null
-        sc.exe delete UsoSvc      | Out-Null
-        sc.exe delete WaaSMedicSvc| Out-Null
-        Write-Host "Windows Update services removed" -ForegroundColor Green
-    } catch {
-        Write-ErrorLog -FunctionName "RemoveWindowsUpdateServices" -ErrorMessage "Failed to remove update services" -ErrorRecord $_
-    }
+        Ensure-RegistryPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender"
+        Ensure-RegistryPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection"
+        Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection" -Name "DisableRealtimeMonitoring" -Value 1 -Type DWord -Force
+        Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection" -Name "DisableIOAVProtection" -Value 1 -Type DWord -Force
+        Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection" -Name "DisableBehaviorMonitoring" -Value 1 -Type DWord -Force
+        Ensure-RegistryPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet"
+        Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet" -Name "SpynetReporting" -Value 0 -Type DWord -Force
+        Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet" -Name "SubmitSamplesConsent" -Value 2 -Type DWord -Force
+        # Try to turn off realtime scanning now
+        try { Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue } catch {}
+        Disable-ServiceSafely -ServiceName "WinDefend" -DisplayName "Microsoft Defender Antivirus" -NoStopOnError
+        Disable-ServiceSafely -ServiceName "WdNisSvc" -DisplayName "Microsoft Defender Antivirus Network Inspection Service" -NoStopOnError
+        Disable-ServiceSafely -ServiceName "SecurityHealthService" -DisplayName "Windows Security Center" -NoStopOnError
+        Disable-ServiceSafely -ServiceName "Sense" -DisplayName "Microsoft Defender for Endpoint Service" -NoStopOnError
+    } catch {}
 
-    Write-Host "Removing SoftwareDistribution and catroot2 folders..." -ForegroundColor Cyan
-    try {
-        Remove-Item -Path "C:\Windows\SoftwareDistribution" -Recurse -Force -ErrorAction Stop
-        Remove-Item -Path "C:\Windows\System32\catroot2"        -Recurse -Force -ErrorAction Stop
-        Write-Host "Update folders removed successfully" -ForegroundColor Green
-    } catch {
-        Write-ErrorLog -FunctionName "RemoveUpdateFolders" -ErrorMessage "Failed to delete update folders" -ErrorRecord $_
-    }
-
-    Write-Host "Unregistering Windows Update scheduled tasks..." -ForegroundColor Cyan
-    try {
-        # Use a valid TaskPath (no wildcard)
-        Get-ScheduledTask -TaskPath "\Microsoft\Windows\WindowsUpdate\" -ErrorAction SilentlyContinue |
-            Unregister-ScheduledTask -Confirm:$false -ErrorAction SilentlyContinue
-        Write-Host "Windows Update tasks removed" -ForegroundColor Green
-    } catch {
-        Write-ErrorLog -FunctionName "RemoveUpdateTasks" -ErrorMessage "Failed to unregister update tasks" -ErrorRecord $_
-    }
+    Write-Host "VDI background-usage minimization applied" -ForegroundColor Green
 }
 catch {
-    Write-ErrorLog -FunctionName "DisableWindowsUpdate" -ErrorMessage "Error disabling Windows Update" -ErrorRecord $_
+    Write-ErrorLog -FunctionName "VDI-Optimization" -ErrorMessage ("Failed to apply VDI background minimization: " + $_.Exception.Message) -ErrorRecord $_
 }
 #endregion
 
@@ -1339,6 +1424,7 @@ Write-Host "Suppressing first-run experiences for installed applications..." -Fo
 # Function to create default user profiles and suppress first-run dialogs
 <#
 .SYNOPSIS
+
   Configures policies and user defaults to suppress welcome/first-run UX per application.
 .DESCRIPTION
   Writes policy keys/files and opinionated defaults to reduce prompts on first launch.
@@ -1827,14 +1913,22 @@ user_pref("browser.newtabpage.introShown", true);
 user_pref("browser.firstrun.show.localepicker", false);
 user_pref("browser.firstrun.show.uidiscovery", false);
 user_pref("datareporting.policy.firstRunURL", "");
+user_pref("toolkit.startup.max_resumed_crashes", -1);
 user_pref("browser.sessionstore.resume_from_crash", false);
 user_pref("browser.shell.checkDefaultBrowser", false);
 user_pref("browser.rights.override", true);
+user_pref("datareporting.policy.dataSubmissionPolicyNotifiedTime", "1000000000000000");
+user_pref("datareporting.policy.dataSubmissionPolicyAcceptedVersion", 2);
+user_pref("datareporting.policy.dataSubmissionPolicyBypassNotification", true);
 user_pref("app.shield.optoutstudies.enabled", false);
 user_pref("datareporting.healthreport.uploadEnabled", false);
+user_pref("datareporting.policy.firstRunTime", "1000000000000000");
+user_pref("browser.bookmarks.restore_default_bookmarks", false);
+user_pref("browser.disableResetPrompt", true);
 user_pref("browser.onboarding.enabled", false);
 user_pref("browser.laterrun.enabled", false);
 user_pref("browser.aboutwelcome.enabled", false);
+user_pref("trailhead.firstrun.didSeeAboutWelcome", true);
 '@
                 foreach ($torDir in $torDirs) {
                     $profilePath = Join-Path $torDir "Browser\\TorBrowser\\Data\\Browser\\profile.default"
