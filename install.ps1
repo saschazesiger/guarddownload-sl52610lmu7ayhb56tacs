@@ -25,6 +25,20 @@ if (-not (Test-IsAdministrator)) {
     exit 1
 }
 
+# 1) VirtIO-ISO/Letter finden (fällt auf E: zurück)
+$vol = Get-Volume | Where-Object { $_.FileSystemLabel -match 'VIRTIO' -or $_.DriveLetter -eq 'E' } | Select-Object -First 1
+$root = "$($vol.DriveLetter):\"
+
+# 2) NetKVM-INF finden (bevorzugt Win11/amd64)
+$inf = Get-ChildItem -Path $root -Recurse -Filter 'netkvm.inf' |
+       Where-Object { $_.FullName -match '\\w11\\amd64\\' -or $_.FullName -match '\\WIN11\\AMD64\\' -or $_.FullName -match '\\amd64\\' } |
+       Sort-Object FullName -Descending | Select-Object -First 1
+
+if (-not $inf) { throw "netkvm.inf nicht gefunden." }
+
+# 3) In Treiberspeicher aufnehmen und (falls Gerät vorhanden) installieren
+pnputil /add-driver "$($inf.FullName)" /install
+
 # Global variable for enhanced error logging
 $global:errorLog = @()
 
