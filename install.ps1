@@ -650,6 +650,7 @@ lockPref("app.update.service.enabled", false);
             }
         }
     }
+}
 #endregion
 
 #region Suppress First-Run Experiences Function Definition
