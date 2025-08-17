@@ -140,10 +140,6 @@
 		</component>
 		<component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
 			<UserAccounts>
-				<AdministratorPassword>
-					<Value>GuardAdminAccount5044!</Value>
-					<PlainText>true</PlainText>
-				</AdministratorPassword>
 				<LocalAccounts>
 					<LocalAccount wcm:action="add">
 						<Name>User</Name>
@@ -157,11 +153,11 @@
 				</LocalAccounts>
 			</UserAccounts>
 			<AutoLogon>
-				<Username>Administrator</Username>
+				<Username>User</Username>
 				<Enabled>true</Enabled>
 				<LogonCount>1</LogonCount>
 				<Password>
-					<Value>GuardAdminAccount5044!</Value>
+					<Value>GuardUser5046!</Value>
 					<PlainText>true</PlainText>
 				</Password>
 			</AutoLogon>
@@ -344,6 +340,9 @@ $scripts = @(
 	};
 	{
 		Get-Content -LiteralPath 'C:\Windows\Setup\Scripts\SetStartPins.ps1' -Raw | Invoke-Expression;
+	};
+	{
+		net.exe user Administrator /active:no;
 	};
 );
 
