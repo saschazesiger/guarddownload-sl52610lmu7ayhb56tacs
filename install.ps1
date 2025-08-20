@@ -521,6 +521,24 @@ try {
 } catch {
     Write-ErrorLog -FunctionName "ScheduleReboot" -ErrorMessage "Failed to schedule reboot" -ErrorRecord $_
 }
+#endregion
+
+#region Cleanup Desktop Files
+Write-Host "Cleaning up temporary files..." -ForegroundColor Cyan
+try {
+    $desktop = [Environment]::GetFolderPath("Desktop")
+    $remoteInstallFile = Join-Path $desktop "install_remote.ps1"
+    
+    if (Test-Path $remoteInstallFile) {
+        Remove-Item -Path $remoteInstallFile -Force -ErrorAction Stop
+        Write-Host "Removed temporary file: install_remote.ps1" -ForegroundColor Green
+    } else {
+        Write-Host "Temporary file install_remote.ps1 not found on desktop" -ForegroundColor Yellow
+    }
+} catch {
+    Write-ErrorLog -FunctionName "CleanupDesktopFiles" -ErrorMessage "Failed to remove temporary desktop files" -ErrorRecord $_
+}
+#endregion
 
 # Stop transcript logging
 try { Stop-Transcript | Out-Null } catch {}
