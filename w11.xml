@@ -19,7 +19,7 @@
     <disk type='file' device='disk'>
       <driver name='qemu' type='qcow2'/>
       <source file='/virtdev/os.qcow2'/>
-      <target dev='sda' bus='sata'/>
+      <target dev='sda' bus='virtio'/>
     </disk>
     <disk type='file' device='cdrom'>
       <driver name='qemu' type='raw'/>
