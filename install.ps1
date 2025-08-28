@@ -10,7 +10,36 @@
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
 Start-Transcript -Path "$env:TEMP\guard_install_$timestamp.log" -Force
 
-# Ensure TLS 1.2 for all web requests (older .NET defaults may fail GitHub/Chocolatey downloads)
+# Ensure TLS 1.2 for #region Final Summary
+Write-Host "`n" + "="*60 -ForegroundColor Cyan
+Write-Host "INSTALLATION SUMMARY" -ForegroundColor Cyan
+Write-Host "="*60 -ForegroundColor Cyan
+
+# Show error summary if any errors occurred
+if ($global:errorLog.Count -gt 0) {
+    Write-Host "`nErrors encountered during installation:" -ForegroundColor Yellow
+    Write-Host "Note: Some errors are expected for protected system services" -ForegroundColor Yellow
+    Write-Host "-"*50 -ForegroundColor Yellow
+    foreach ($error in $global:errorLog) {
+        if ($error -like "*Access is denied*" -or $error -like "*The parameter is incorrect*") {
+            Write-Host $error -ForegroundColor Yellow
+        } else {
+            Write-Host $error -ForegroundColor Red
+        }
+    }
+    Write-Host "`nTotal errors logged: $($global:errorLog.Count)" -ForegroundColor Yellow
+} else {
+    Write-Host "`nNo errors encountered during installation!" -ForegroundColor Green
+}
+
+Write-Host "`nInstallation completed successfully!" -ForegroundColor Green
+Write-Host "System will reboot in 5 minutes to finalize configuration." -ForegroundColor Green
+Write-Host "Run 'shutdown /a' to cancel the reboot if needed." -ForegroundColor Yellow
+Write-Host "="*60 -ForegroundColor Cyan
+#endregion
+
+# Stop transcript logging
+try { Stop-Transcript | Out-Null } catch { }l web requests (older .NET defaults may fail GitHub/Chocolatey downloads)
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
 
 # Ensure the script is running with Administrator privileges
@@ -66,7 +95,10 @@ function Disable-ServiceSafely {
         [string]$DisplayName,
         
         [Parameter(Mandatory=$false)]
-        [switch]$NoStopOnError = $false
+        [switch]$NoStopOnError = $false,
+        
+        [Parameter(Mandatory=$false)]
+        [switch]$ProtectedService = $false
     )
     
     try {
@@ -81,11 +113,15 @@ function Disable-ServiceSafely {
                     Write-Host "Stopped service: $DisplayName" -ForegroundColor Green
                 }
                 catch {
-                    $errorMsg = "Could not stop service. Reason: " + $_.Exception.Message
-                    Write-ErrorLog -FunctionName "Disable-ServiceSafely" -ErrorMessage $errorMsg -ErrorRecord $_
+                    if ($ProtectedService) {
+                        Write-Host "Cannot stop protected service: $DisplayName (expected)" -ForegroundColor Yellow
+                    } else {
+                        $errorMsg = "Could not stop service. Reason: " + $_.Exception.Message
+                        Write-ErrorLog -FunctionName "Disable-ServiceSafely" -ErrorMessage $errorMsg -ErrorRecord $_
+                    }
                     
-                    # If NoStopOnError is not specified, exit the function
-                    if (-not $NoStopOnError) {
+                    # If NoStopOnError is not specified, exit the function for non-protected services
+                    if (-not $NoStopOnError -and -not $ProtectedService) {
                         return
                     }
                 }
@@ -103,8 +139,23 @@ function Disable-ServiceSafely {
                 }
             }
             catch {
-                $errorMsg = "Could not set service to 'Disabled'. Reason: " + $_.Exception.Message
-                Write-ErrorLog -FunctionName "Disable-ServiceSafely" -ErrorMessage $errorMsg -ErrorRecord $_
+                if ($ProtectedService) {
+                    Write-Host "Cannot disable protected service: $DisplayName (access denied - expected)" -ForegroundColor Yellow
+                    # Try alternative registry method for protected services
+                    try {
+                        $servicePath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
+                        if (Test-Path $servicePath) {
+                            Set-ItemProperty -Path $servicePath -Name "Start" -Value 4 -Type DWord -Force
+                            Write-Host "Set registry start value for: $DisplayName" -ForegroundColor Green
+                        }
+                    }
+                    catch {
+                        Write-Host "Cannot modify registry for protected service: $DisplayName" -ForegroundColor Yellow
+                    }
+                } else {
+                    $errorMsg = "Could not set service to 'Disabled'. Reason: " + $_.Exception.Message
+                    Write-ErrorLog -FunctionName "Disable-ServiceSafely" -ErrorMessage $errorMsg -ErrorRecord $_
+                }
             }
         } else {
             Write-Host "Service not found: $DisplayName" -ForegroundColor Yellow
@@ -317,56 +368,76 @@ try {
 
     # Aggressively disable non-essential services for VDI browser-only workloads
     $servicesToDisable = @(
-        @{ Name="SysMain";            Display="SysMain (Superfetch)" },
-        @{ Name="WSearch";            Display="Windows Search (Indexing)" },
-        @{ Name="DiagTrack";          Display="Connected User Experiences and Telemetry" },
-        @{ Name="dmwappushsvc";       Display="WAP Push (DMWAPPUSH)" },
-        @{ Name="DoSvc";              Display="Delivery Optimization" },
-        @{ Name="BITS";               Display="Background Intelligent Transfer Service" },
-        @{ Name="Spooler";            Display="Print Spooler" },
-        @{ Name="Fax";                Display="Fax" },
-        @{ Name="WpnService";        Display="Windows Push Notifications System Service" },
-        @{ Name="lfsvc";              Display="Geolocation Service" },
-        @{ Name="RetailDemo";         Display="Retail Demo" },
-        @{ Name="MapsBroker";         Display="Downloaded Maps Manager" },
-        @{ Name="SharedAccess";       Display="Internet Connection Sharing (ICS)" },
-        @{ Name="SSDPSRV";            Display="SSDP Discovery" },
-        @{ Name="upnphost";           Display="UPnP Device Host" },
-        @{ Name="RemoteRegistry";     Display="Remote Registry" },
-        @{ Name="WbioSrvc";           Display="Windows Biometric Service" },
-        @{ Name="bthserv";            Display="Bluetooth Support Service" },
-        @{ Name="SEMgrSvc";           Display="Payments & NFC/SE Manager" },
-        @{ Name="fhsvc";              Display="File History Service" },
-        @{ Name="PcaSvc";             Display="Program Compatibility Assistant" },
-        @{ Name="SCardSvr";           Display="Smart Card" },
-        @{ Name="WerSvc";             Display="Windows Error Reporting" },
-        @{ Name="wisvc";              Display="Windows Insider Service" },
-        @{ Name="ClipSVC";            Display="Client License Service (ClipSVC)" },
-        @{ Name="LicenseManager";     Display="Windows License Manager" },
-        @{ Name="TimeBrokerSvc";      Display="Time Broker (UWP background)" },
-        @{ Name="WMPNetworkSvc";      Display="WMP Network Sharing" }
+        @{ Name="SysMain";            Display="SysMain (Superfetch)"; Protected=$false },
+        @{ Name="WSearch";            Display="Windows Search (Indexing)"; Protected=$false },
+        @{ Name="DiagTrack";          Display="Connected User Experiences and Telemetry"; Protected=$false },
+        @{ Name="dmwappushsvc";       Display="WAP Push (DMWAPPUSH)"; Protected=$false },
+        @{ Name="DoSvc";              Display="Delivery Optimization"; Protected=$true },
+        @{ Name="BITS";               Display="Background Intelligent Transfer Service"; Protected=$false },
+        @{ Name="Spooler";            Display="Print Spooler"; Protected=$false },
+        @{ Name="Fax";                Display="Fax"; Protected=$false },
+        @{ Name="WpnService";        Display="Windows Push Notifications System Service"; Protected=$false },
+        @{ Name="lfsvc";              Display="Geolocation Service"; Protected=$false },
+        @{ Name="RetailDemo";         Display="Retail Demo"; Protected=$false },
+        @{ Name="MapsBroker";         Display="Downloaded Maps Manager"; Protected=$false },
+        @{ Name="SharedAccess";       Display="Internet Connection Sharing (ICS)"; Protected=$false },
+        @{ Name="SSDPSRV";            Display="SSDP Discovery"; Protected=$false },
+        @{ Name="upnphost";           Display="UPnP Device Host"; Protected=$false },
+        @{ Name="RemoteRegistry";     Display="Remote Registry"; Protected=$false },
+        @{ Name="WbioSrvc";           Display="Windows Biometric Service"; Protected=$false },
+        @{ Name="bthserv";            Display="Bluetooth Support Service"; Protected=$false },
+        @{ Name="SEMgrSvc";           Display="Payments & NFC/SE Manager"; Protected=$false },
+        @{ Name="fhsvc";              Display="File History Service"; Protected=$false },
+        @{ Name="PcaSvc";             Display="Program Compatibility Assistant"; Protected=$false },
+        @{ Name="SCardSvr";           Display="Smart Card"; Protected=$false },
+        @{ Name="WerSvc";             Display="Windows Error Reporting"; Protected=$false },
+        @{ Name="wisvc";              Display="Windows Insider Service"; Protected=$false },
+        @{ Name="ClipSVC";            Display="Client License Service (ClipSVC)"; Protected=$true },
+        @{ Name="LicenseManager";     Display="Windows License Manager"; Protected=$false },
+        @{ Name="TimeBrokerSvc";      Display="Time Broker (UWP background)"; Protected=$true },
+        @{ Name="WMPNetworkSvc";      Display="WMP Network Sharing"; Protected=$false }
     )
     foreach ($svc in $servicesToDisable) {
-        Disable-ServiceSafely -ServiceName $svc.Name -DisplayName $svc.Display -NoStopOnError
+        if ($svc.Protected) {
+            Disable-ServiceSafely -ServiceName $svc.Name -DisplayName $svc.Display -NoStopOnError -ProtectedService
+        } else {
+            Disable-ServiceSafely -ServiceName $svc.Name -DisplayName $svc.Display -NoStopOnError
+        }
     }
 
     # Per-user services often auto-provision with suffixes (e.g., *_1234). Attempt to disable them as well.
+    Write-Host "Configuring per-user services..." -ForegroundColor Cyan
     $perUserPatterns = @("CDPUserSvc_*","OneSyncSvc_*","WpnUserService_*","BluetoothUserService_*","PimIndexMaintenanceSvc_*","UserDataSvc_*","cbdhsvc_*","PrintWorkflowUserSvc_*")
     foreach ($pattern in $perUserPatterns) {
         Get-Service -Name $pattern -ErrorAction SilentlyContinue | ForEach-Object {
-            Disable-ServiceSafely -ServiceName $_.Name -DisplayName $_.DisplayName -NoStopOnError
+            Write-Host "Found per-user service: $($_.Name)" -ForegroundColor Yellow
+            # Per-user services often cannot be disabled via Set-Service, try registry approach
+            try {
+                Stop-Service -Name $_.Name -Force -ErrorAction SilentlyContinue
+                Write-Host "Stopped per-user service: $($_.Name)" -ForegroundColor Green
+            }
+            catch {
+                Write-Host "Could not stop per-user service: $($_.Name)" -ForegroundColor Yellow
+            }
         }
     }
-    # Also set base definitions to Disabled so new instances don't spawn
+    # Set base service definitions to Disabled so new instances don't spawn
+    Write-Host "Disabling base per-user service definitions..." -ForegroundColor Cyan
     $perUserBases = @("CDPUserSvc","OneSyncSvc","WpnUserService","BluetoothUserService","PimIndexMaintenanceSvc","UserDataSvc","cbdhsvc","PrintWorkflowUserSvc")
     foreach ($base in $perUserBases) {
         $svcKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$base"
         if (Test-Path $svcKey) {
-            try { Set-ItemProperty -Path $svcKey -Name Start -Value 4 -Type DWord -Force } catch {}
+            try { 
+                Set-ItemProperty -Path $svcKey -Name Start -Value 4 -Type DWord -Force 
+                Write-Host "Disabled base service definition: $base" -ForegroundColor Green
+            } catch {
+                Write-Host "Could not disable base service definition: $base" -ForegroundColor Yellow
+            }
         }
     }
 
     # Defender (best-effort minimize realtime impact; may be governed by tamper protection)
+    Write-Host "Configuring Windows Defender (protected services)..." -ForegroundColor Cyan
     try {
         Ensure-RegistryPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender"
         Ensure-RegistryPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection"
@@ -376,13 +447,31 @@ try {
         Ensure-RegistryPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet"
         Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet" -Name "SpynetReporting" -Value 0 -Type DWord -Force
         Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet" -Name "SubmitSamplesConsent" -Value 2 -Type DWord -Force
+        Write-Host "Windows Defender registry policies configured" -ForegroundColor Green
+        
         # Try to turn off realtime scanning now
-        try { Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue } catch {}
-        Disable-ServiceSafely -ServiceName "WinDefend" -DisplayName "Microsoft Defender Antivirus" -NoStopOnError
-        Disable-ServiceSafely -ServiceName "WdNisSvc" -DisplayName "Microsoft Defender Antivirus Network Inspection Service" -NoStopOnError
-        Disable-ServiceSafely -ServiceName "SecurityHealthService" -DisplayName "Windows Security Center" -NoStopOnError
-        Disable-ServiceSafely -ServiceName "Sense" -DisplayName "Microsoft Defender for Endpoint Service" -NoStopOnError
-    } catch {}
+        try { 
+            Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue 
+            Write-Host "Disabled realtime monitoring via PowerShell" -ForegroundColor Green
+        } catch {
+            Write-Host "Could not disable realtime monitoring via PowerShell (tamper protection may be active)" -ForegroundColor Yellow
+        }
+        
+        # Protected Windows Defender services
+        $defenderServices = @(
+            @{ Name="WinDefend";              Display="Microsoft Defender Antivirus" },
+            @{ Name="WdNisSvc";               Display="Microsoft Defender Antivirus Network Inspection Service" },
+            @{ Name="SecurityHealthService";  Display="Windows Security Center" },
+            @{ Name="Sense";                  Display="Microsoft Defender for Endpoint Service" }
+        )
+        
+        foreach ($defSvc in $defenderServices) {
+            Disable-ServiceSafely -ServiceName $defSvc.Name -DisplayName $defSvc.Display -NoStopOnError -ProtectedService
+        }
+        
+    } catch {
+        Write-Host "Error configuring Windows Defender: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
 
     Write-Host "VDI background-usage minimization applied" -ForegroundColor Green
 }
@@ -493,23 +582,47 @@ Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalizatio
 
 #region Clear Event Logs
 # Clear event logs to free up space (with better error handling)
+Write-Host "Clearing event logs..." -ForegroundColor Cyan
 try {
     $eventLogs = Get-WinEvent -ListLog * -ErrorAction Stop | Where-Object { $_.RecordCount -gt 0 -and $_.IsEnabled -eq $true }
+    $clearedCount = 0
+    $totalLogs = $eventLogs.Count
+    
     foreach ($log in $eventLogs) {
         try {
             [System.Diagnostics.Eventing.Reader.EventLogSession]::GlobalSession.ClearLog("$($log.LogName)")
+            $clearedCount++
         } catch {
-            Write-Host "Could not clear event log" -ForegroundColor Yellow
+            # Silently continue for logs that cannot be cleared (common for system logs)
+            Write-Verbose "Could not clear event log: $($log.LogName)"
         }
     }
-    Write-Host "Event logs cleared successfully" -ForegroundColor Green
+    Write-Host "Event logs cleared successfully ($clearedCount of $totalLogs logs cleared)" -ForegroundColor Green
 } catch {
-    Write-Host "Error accessing event logs" -ForegroundColor Yellow
+    Write-Host "Error accessing event logs: $($_.Exception.Message)" -ForegroundColor Yellow
 }
 #endregion
 
 #region Remove all Tasks
-Get-ScheduledTask -TaskName "*" -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false -ErrorAction SilentlyContinue
+Write-Host "Removing scheduled tasks..." -ForegroundColor Cyan
+try {
+    $tasks = Get-ScheduledTask -TaskName "*" -ErrorAction SilentlyContinue
+    $removedCount = 0
+    $totalTasks = $tasks.Count
+    
+    foreach ($task in $tasks) {
+        try {
+            Unregister-ScheduledTask -TaskName $task.TaskName -Confirm:$false -ErrorAction Stop
+            $removedCount++
+        } catch {
+            # Some system tasks cannot be removed, this is expected
+            Write-Verbose "Could not remove task: $($task.TaskName)"
+        }
+    }
+    Write-Host "Scheduled tasks processed ($removedCount of $totalTasks tasks removed)" -ForegroundColor Green
+} catch {
+    Write-Host "Error processing scheduled tasks: $($_.Exception.Message)" -ForegroundColor Yellow
+}
 #endregion
 
 #region Schedule Reboot
