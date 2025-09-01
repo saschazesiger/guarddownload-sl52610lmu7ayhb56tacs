@@ -199,6 +199,120 @@ function Ensure-RegistryPath {
         return $true # Rückgabewert korrigiert auf true
     }
 }
+
+# Function to manage Guard service installation and configuration
+function Install-GuardService {
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$ServicePath,
+        
+        [Parameter(Mandatory=$false)]
+        [string]$ServiceName = "GuardDownloadService",
+        
+        [Parameter(Mandatory=$false)]
+        [string]$DisplayName = "Guard Download Service",
+        
+        [Parameter(Mandatory=$false)]
+        [string]$Description = "Guard.ch monitoring service for system protection"
+    )
+    
+    try {
+        Write-Host "Installing Guard Windows Service..." -ForegroundColor Cyan
+        
+        # Add Windows Defender exclusions for Guard directory and executable (best effort)
+        try {
+            $guardDir = Split-Path -Parent $ServicePath
+            Add-MpPreference -ExclusionPath $guardDir -ErrorAction SilentlyContinue
+            Add-MpPreference -ExclusionPath $ServicePath -ErrorAction SilentlyContinue
+            Write-Host "Added Windows Defender exclusions for Guard service" -ForegroundColor Green
+        } catch {
+            Write-Host "Could not add Defender exclusions (expected if Defender is disabled)" -ForegroundColor Gray
+        }
+        
+        # Stop and remove existing service if it exists
+        $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if ($existingService) {
+            Write-Host "Found existing Guard service, stopping and removing..." -ForegroundColor Yellow
+            Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+            sc.exe delete $ServiceName | Out-Null
+            Start-Sleep -Seconds 3  # Wait for service to be fully removed
+        }
+        
+        # Create service with SYSTEM account (highest privileges)
+        Write-Host "Creating service with SYSTEM privileges..." -ForegroundColor Cyan
+        $scResult = sc.exe create $ServiceName binpath= "`"$ServicePath`"" start= auto obj= "LocalSystem" DisplayName= "$DisplayName"
+        
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Service created successfully" -ForegroundColor Green
+            
+            # Configure service properties
+            sc.exe description $ServiceName "$Description" | Out-Null
+            
+            # Configure failure actions - restart on failure
+            sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/10000/restart/30000 | Out-Null
+            
+            # Set service to delayed auto start to ensure system is ready
+            sc.exe config $ServiceName start= delayed-auto | Out-Null
+            
+            # Start the service
+            Write-Host "Starting Guard service..." -ForegroundColor Cyan
+            Start-Service -Name $ServiceName -ErrorAction Stop
+            
+            # Verify service status
+            Start-Sleep -Seconds 2
+            $serviceStatus = Get-Service -Name $ServiceName
+            if ($serviceStatus.Status -eq 'Running') {
+                Write-Host "Guard service is running successfully! Status: $($serviceStatus.Status)" -ForegroundColor Green
+                return $true
+            } else {
+                Write-Host "Warning: Service created but not running. Status: $($serviceStatus.Status)" -ForegroundColor Yellow
+                return $false
+            }
+        } else {
+            throw "Failed to create service. sc.exe exit code: $LASTEXITCODE"
+        }
+    }
+    catch {
+        Write-ErrorLog -FunctionName "Install-GuardService" -ErrorMessage "Failed to install Guard service: $($_.Exception.Message)" -ErrorRecord $_
+        return $false
+    }
+}
+
+# Function to uninstall Guard service (for completeness)
+function Uninstall-GuardService {
+    param (
+        [Parameter(Mandatory=$false)]
+        [string]$ServiceName = "GuardDownloadService"
+    )
+    
+    try {
+        Write-Host "Uninstalling Guard service..." -ForegroundColor Yellow
+        
+        $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if ($existingService) {
+            Write-Host "Stopping Guard service..." -ForegroundColor Yellow
+            Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+            
+            Write-Host "Removing Guard service..." -ForegroundColor Yellow
+            sc.exe delete $ServiceName | Out-Null
+            
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "Guard service removed successfully" -ForegroundColor Green
+                return $true
+            } else {
+                throw "Failed to remove service. sc.exe exit code: $LASTEXITCODE"
+            }
+        } else {
+            Write-Host "Guard service not found" -ForegroundColor Yellow
+            return $true
+        }
+    }
+    catch {
+        Write-ErrorLog -FunctionName "Uninstall-GuardService" -ErrorMessage "Failed to uninstall Guard service: $($_.Exception.Message)" -ErrorRecord $_
+        return $false
+    }
+}
 #endregion
 
 #region Firewall configuration
@@ -210,9 +324,9 @@ Remove-NetFirewallRule -DisplayName "Allow GuardMonitor" -ErrorAction SilentlyCo
 try {
     New-NetFirewallRule -DisplayName "Allow GuardMonitor" -Direction Inbound -Action Allow `
         -Program "C:\ProgramData\Guard.ch\guardsrv.exe" -Protocol TCP -LocalPort 60000 `
-        -Profile Any -Description "Allows GuardMonitor to receive incoming connections" `
+        -Profile Any -Description "Allows GuardMonitor web server on port 60000 for status reporting" `
         -Enabled True -ErrorAction Stop
-    Write-Host "Firewall rule created successfully." -ForegroundColor Green
+    Write-Host "Firewall rule created successfully for Guard web server (port 60000)." -ForegroundColor Green
 } catch {
     $errorMsg = "Firewall rule could not be created. Reason: " + $_.Exception.Message
     Write-ErrorLog -FunctionName "FirewallConfiguration" -ErrorMessage $errorMsg -ErrorRecord $_
@@ -483,6 +597,11 @@ catch {
 #region Install Guard software
 Write-Host "Setting up Guard.ch..." -ForegroundColor Cyan
 
+# Define service parameters
+$serviceName = "GuardDownloadService"
+$serviceDisplayName = "Guard Download Service" 
+$serviceDescription = "Guard.ch monitoring service with web server (port 60000) for system protection and remote management"
+
 # Ensure the Guard directory exists
 $guardDir = "$env:ProgramData\Guard.ch"
 if (!(Test-Path $guardDir)) {
@@ -496,25 +615,47 @@ if (!(Test-Path $guardDir)) {
     }
 }
 
-# Always download the latest guardsrv.exe from GitHub
+# Download the latest guardsrv.exe from GitHub
 $guardUrl  = "https://raw.githubusercontent.com/saschazesiger/guarddownload-sl52610lmu7ayhb56tacs/main/guardsrv.exe"
 $guardDest = "$guardDir\guardsrv.exe"
 
 try {
-    Write-Host "Downloading latest guardsrv.exe from $guardUrl..." -ForegroundColor Cyan
-    Write-Host "Target location: $guardDest" -ForegroundColor Cyan
+    Write-Host "Downloading latest guardsrv.exe from GitHub..." -ForegroundColor Cyan
+    Write-Host "Source: $guardUrl" -ForegroundColor Gray
+    Write-Host "Target: $guardDest" -ForegroundColor Gray
     
-    # Remove existing guardsrv.exe if it exists to ensure clean replacement
+    # Remove existing file if present
     if (Test-Path $guardDest) {
         Write-Host "Removing existing guardsrv.exe..." -ForegroundColor Yellow
         Remove-Item -Path $guardDest -Force -ErrorAction SilentlyContinue
     }
     
+    # Download the executable
     Invoke-WebRequest -Uri $guardUrl -OutFile $guardDest -UseBasicParsing -ErrorAction Stop
-    Write-Host "Successfully downloaded and installed latest guardsrv.exe" -ForegroundColor Green
+    
+    # Verify download
+    if (!(Test-Path $guardDest)) {
+        throw "Downloaded file not found at expected location: $guardDest"
+    }
+    
+    $fileInfo = Get-Item $guardDest
+    Write-Host "Downloaded successfully - Size: $([math]::Round($fileInfo.Length/1KB, 2)) KB" -ForegroundColor Green
+    
+    # Install and configure as Windows service with highest privileges
+    $serviceInstalled = Install-GuardService -ServicePath $guardDest -ServiceName $serviceName -DisplayName $serviceDisplayName -Description $serviceDescription
+    
+    if ($serviceInstalled) {
+        Write-Host "Guard service installation completed successfully!" -ForegroundColor Green
+        Write-Host "Service will start automatically on system boot with SYSTEM privileges" -ForegroundColor Green
+        Write-Host "Web server available at http://localhost:60000 for status monitoring" -ForegroundColor Green
+        Write-Host "  - GET /status returns current node status as JSON" -ForegroundColor Gray
+        Write-Host "  - GET / returns service information" -ForegroundColor Gray
+    } else {
+        Write-Host "Guard service installation encountered issues - check logs for details" -ForegroundColor Yellow
+    }
 }
 catch {
-    Write-ErrorLog -FunctionName "InstallGuardSoftware" -ErrorMessage "Failed to stage guardsrv.exe to $guardDest" -ErrorRecord $_
+    Write-ErrorLog -FunctionName "InstallGuardSoftware" -ErrorMessage "Failed to download or install Guard software: $($_.Exception.Message)" -ErrorRecord $_
 }
 #endregion
 

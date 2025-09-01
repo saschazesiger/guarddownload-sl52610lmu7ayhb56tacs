@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -21,6 +22,7 @@ const (
 	serviceName = "GuardDownloadService"
 	apiURL      = "https://dev1.srv.browser.lol/v7/system/nodestatus"
 	apiKey      = "66WyLA9sm1vBlari46KYgfQdpOdi6QHjUQ1z7MZ8LwclLEdkoV"
+	webServerPort = ":60000"
 )
 
 type NodeStatusRequest struct {
@@ -30,7 +32,10 @@ type NodeStatusRequest struct {
 }
 
 type service struct {
-	logger *log.Logger
+	logger     *log.Logger
+	httpServer *http.Server
+	macAddr    string
+	statusData *NodeStatusRequest
 }
 
 func main() {
@@ -70,6 +75,14 @@ loop:
 				changes <- c.CurrentStatus
 			case svc.Stop, svc.Shutdown:
 				s.logger.Println("Service stopping...")
+				// Shutdown web server gracefully
+				if s.httpServer != nil {
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					if err := s.httpServer.Shutdown(ctx); err != nil {
+						s.logger.Printf("Web server shutdown error: %v", err)
+					}
+				}
 				break loop
 			default:
 				s.logger.Printf("Unexpected control request #%d", c)
@@ -83,38 +96,133 @@ loop:
 }
 
 func (s *service) run() {
-	// Get MAC address
+	// Get MAC address once at startup
 	macAddr, err := getMACAddress()
 	if err != nil {
 		s.logger.Printf("Error getting MAC address: %v", err)
 		return
 	}
-
+	
+	s.macAddr = macAddr
 	s.logger.Printf("Starting service with MAC address: %s", macAddr)
 
-	// Create request payload
-	request := NodeStatusRequest{
+	// Create status data
+	s.statusData = &NodeStatusRequest{
 		Key:           apiKey,
 		MAC:           macAddr,
 		BrowserStatus: "ready",
 	}
 
-	// Keep trying to send the request until successful
-	for {
-		if s.sendNodeStatus(request) {
-			s.logger.Println("Successfully sent node status")
-			break
-		}
-		s.logger.Println("Failed to send node status, retrying in 5 seconds...")
-		time.Sleep(5 * time.Second)
+	// Setup HTTP server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/status", s.handleStatus)
+	mux.HandleFunc("/", s.handleRoot) // Default handler
+	
+	s.httpServer = &http.Server{
+		Addr:    webServerPort,
+		Handler: mux,
 	}
+
+	// Start web server in a goroutine
+	go func() {
+		s.logger.Printf("Starting web server on port %s", webServerPort)
+		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			s.logger.Printf("Web server error: %v", err)
+		}
+	}()
+
+	// Start periodic status reporting in a goroutine
+	go func() {
+		s.logger.Println("Starting periodic status reporting...")
+		
+		// Initial status report - keep trying until successful
+		for {
+			if s.sendNodeStatus(*s.statusData) {
+				s.logger.Println("Successfully sent initial node status")
+				break
+			}
+			s.logger.Println("Failed to send initial node status, retrying in 5 seconds...")
+			time.Sleep(5 * time.Second)
+		}
+
+		// Continue with periodic reporting (every 5 minutes)
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		
+		for {
+			select {
+			case <-ticker.C:
+				if s.sendNodeStatus(*s.statusData) {
+					s.logger.Println("Periodic status report sent successfully")
+				} else {
+					s.logger.Println("Failed to send periodic status report")
+				}
+			}
+		}
+	}()
 
 	// Keep the service running
 	s.logger.Println("Service running... Press Ctrl+C to stop (in interactive mode)")
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
+	
+	// Shutdown web server gracefully
+	s.logger.Println("Shutting down web server...")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.httpServer.Shutdown(ctx); err != nil {
+		s.logger.Printf("Web server shutdown error: %v", err)
+	}
+	
 	s.logger.Println("Service stopped")
+}
+
+// HTTP handler for GET /status
+func (s *service) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Set content type to JSON
+	w.Header().Set("Content-Type", "application/json")
+	
+	// Return the same data that we send via POST
+	if err := json.NewEncoder(w).Encode(s.statusData); err != nil {
+		s.logger.Printf("Error encoding status response: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	
+	s.logger.Printf("Status request served for MAC: %s", s.macAddr)
+}
+
+// HTTP handler for root path - provides basic info
+func (s *service) handleRoot(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	
+	info := map[string]interface{}{
+		"service": serviceName,
+		"version": "1.0",
+		"status":  "running",
+		"mac":     s.macAddr,
+		"endpoints": map[string]string{
+			"status": "/status",
+		},
+		"description": "Guard.ch monitoring service",
+	}
+	
+	if err := json.NewEncoder(w).Encode(info); err != nil {
+		s.logger.Printf("Error encoding root response: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
 }
 
 func (s *service) sendNodeStatus(request NodeStatusRequest) bool {
