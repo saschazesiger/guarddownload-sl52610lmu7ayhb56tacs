@@ -20,7 +20,7 @@ import (
 
 const (
 	serviceName = "GuardDownloadService"
-	apiURL      = "https://dev1.srv.browser.lol/v7/system/nodestatus"
+	apiURL      = "https://dev1.srv.browser.lol/v7/workspace/startup"
 	apiKey      = "66WyLA9sm1vBlari46KYgfQdpOdi6QHjUQ1z7MZ8LwclLEdkoV"
 	webServerPort = ":60000"
 )
