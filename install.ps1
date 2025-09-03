@@ -15,29 +15,6 @@ Write-Host "`n" + "="*60 -ForegroundColor Cyan
 Write-Host "INSTALLATION SUMMARY" -ForegroundColor Cyan
 Write-Host "="*60 -ForegroundColor Cyan
 
-# Show error summary if any errors occurred
-if ($global:errorLog.Count -gt 0) {
-    Write-Host "`nErrors encountered during installation:" -ForegroundColor Yellow
-    Write-Host "Note: Some errors are expected for protected system services" -ForegroundColor Yellow
-    Write-Host "-"*50 -ForegroundColor Yellow
-    foreach ($error in $global:errorLog) {
-        if ($error -like "*Access is denied*" -or $error -like "*The parameter is incorrect*") {
-            Write-Host $error -ForegroundColor Yellow
-        } else {
-            Write-Host $error -ForegroundColor Red
-        }
-    }
-    Write-Host "`nTotal errors logged: $($global:errorLog.Count)" -ForegroundColor Yellow
-} else {
-    Write-Host "`nNo errors encountered during installation!" -ForegroundColor Green
-}
-
-Write-Host "`nInstallation completed successfully!" -ForegroundColor Green
-Write-Host "System will reboot in 5 minutes to finalize configuration." -ForegroundColor Green
-Write-Host "Run 'shutdown /a' to cancel the reboot if needed." -ForegroundColor Yellow
-Write-Host "="*60 -ForegroundColor Cyan
-#endregion
-
 # Stop transcript logging
 try { Stop-Transcript | Out-Null } catch { }l web requests (older .NET defaults may fail GitHub/Chocolatey downloads)
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
