@@ -227,10 +227,7 @@ function Install-GuardService {
             
             # Configure failure actions - restart on failure
             sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/10000/restart/30000 | Out-Null
-            
-            # Set service to delayed auto start to ensure system is ready
-            sc.exe config $ServiceName start= delayed-auto | Out-Null
-            
+                        
             # Start the service
             Write-Host "Starting Guard service..." -ForegroundColor Cyan
             Start-Service -Name $ServiceName -ErrorAction Stop
