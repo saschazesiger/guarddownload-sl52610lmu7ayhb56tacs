@@ -18,6 +18,8 @@ This Go application provides a Windows service that combines periodic status rep
 
 ### 3. Built-in Web Server (Port 60000)
 - **GET /status** - Returns the same JSON data that's sent to the remote API
+- **GET /health** - Returns `{ "status": "ok", "mac": "<internal-mac>" }`
+- **POST /command** - Executes a PowerShell command (supports async)
 - **GET /** - Returns service information and available endpoints
 - Lightweight HTTP server for local monitoring
 - JSON responses for easy integration
@@ -43,11 +45,52 @@ Returns service information:
   "status": "running",
   "mac": "00:11:22:33:44:55",
   "endpoints": {
-    "status": "/status"
+    "status": "/status",
+    "health": "/health",
+    "command": "/command"
   },
   "description": "Guard.ch monitoring service"
 }
 ```
+
+### GET /health
+Returns a minimal health JSON:
+```json
+{
+  "status": "ok",
+  "mac": "00:11:22:33:44:55"
+}
+```
+
+### POST /command
+Accepts JSON body to execute a PowerShell command:
+```json
+{
+  "command": "Get-Process | Select-Object -First 1",
+  "async": false,
+  "id": "optional-uuid-when-async",
+  "context": "admin | user"
+}
+```
+
+- When `async` is `true`, `id` is required. The endpoint immediately returns:
+```json
+{ "status": "ok", "id": "<provided-id>" }
+```
+and, after execution finishes, posts a webhook to
+`https://dev1.srv.browser.lol/v7/workpsace/PQ0r6CvP7Arr03TiDMGbBxHF6bCyqaSb` with:
+```json
+{ "status": "ok" | "error", "output": "<combined stdout/stderr>", "id": "<provided-id>" }
+```
+
+- When `async` is `false`, the endpoint waits for completion and returns:
+```json
+{ "status": "ok" | "error", "output": "<combined stdout/stderr>" }
+```
+
+#### Context execution
+- `context: "admin"` (default): Runs the command as the service account (SYSTEM) in a non-interactive session via PowerShell. Stdout/stderr is captured and returned.
+- `context: "user"`: Runs the command in the currently logged-on interactive user session (GUI). This is intended for commands that need desktop access (e.g., launching Edge). Output capture is not supported in this mode; synchronous calls return `"output": "started in user session"` on success.
 
 ## Configuration
 
@@ -78,7 +121,7 @@ The service also logs to Windows Event Log for troubleshooting.
 
 To build the executable:
 ```bash
-env GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o guardsrv.exe main.go
+env GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o ../guardsrv.exe main.go
 ```
 
 Note: This must be built for Windows (GOOS=windows) as it uses Windows-specific service APIs.
