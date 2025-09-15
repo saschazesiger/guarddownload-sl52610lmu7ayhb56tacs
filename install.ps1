@@ -718,28 +718,6 @@ try {
 }
 #endregion
 
-#region Remove all Tasks
-Write-Host "Removing scheduled tasks..." -ForegroundColor Cyan
-try {
-    $tasks = Get-ScheduledTask -TaskName "*" -ErrorAction SilentlyContinue
-    $removedCount = 0
-    $totalTasks = $tasks.Count
-    
-    foreach ($task in $tasks) {
-        try {
-            Unregister-ScheduledTask -TaskName $task.TaskName -Confirm:$false -ErrorAction Stop
-            $removedCount++
-        } catch {
-            # Some system tasks cannot be removed, this is expected
-            Write-Verbose "Could not remove task: $($task.TaskName)"
-        }
-    }
-    Write-Host "Scheduled tasks processed ($removedCount of $totalTasks tasks removed)" -ForegroundColor Green
-} catch {
-    Write-Host "Error processing scheduled tasks: $($_.Exception.Message)" -ForegroundColor Yellow
-}
-#endregion
-
 #region Schedule Reboot
 Write-Host "Scheduling a reboot in 5 minutes..." -ForegroundColor Cyan
 try {
