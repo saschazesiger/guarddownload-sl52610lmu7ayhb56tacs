@@ -482,7 +482,6 @@ try {
         @{ Name="wisvc";              Display="Windows Insider Service"; Protected=$false },
         @{ Name="ClipSVC";            Display="Client License Service (ClipSVC)"; Protected=$true },
         @{ Name="LicenseManager";     Display="Windows License Manager"; Protected=$false },
-        @{ Name="TimeBrokerSvc";      Display="Time Broker (UWP background)"; Protected=$true },
         @{ Name="WMPNetworkSvc";      Display="WMP Network Sharing"; Protected=$false }
     )
     foreach ($svc in $servicesToDisable) {
