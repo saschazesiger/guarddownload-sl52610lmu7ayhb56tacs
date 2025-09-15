@@ -694,6 +694,50 @@ catch {
 Ensure-RegistryPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization"
 Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization" -Name "NoLockScreen" -Value 1 -Type DWord -Force
 
+#region Clear Scheduled Tasks
+# Delete all scheduled tasks to minimize background activity
+Write-Host "Clearing all scheduled tasks..." -ForegroundColor Cyan
+try {
+    # Connect to Task Scheduler
+    $taskService = New-Object -ComObject "Schedule.Service"
+    $taskService.Connect()
+
+    # Function to recursively delete all tasks from a folder
+    function Remove-AllTasksFromFolder {
+        param($folder)
+
+        try {
+            # Get all tasks in current folder and delete them
+            $tasks = $folder.GetTasks(0)
+            foreach ($task in $tasks) {
+                try {
+                    Write-Host "Deleting task: $($task.Name)" -ForegroundColor Yellow
+                    $folder.DeleteTask($task.Name, 0)
+                } catch {
+                    Write-Host "Could not delete task: $($task.Name) - $($_.Exception.Message)" -ForegroundColor Yellow
+                }
+            }
+
+            # Recursively process all subfolders
+            $subfolders = $folder.GetFolders(0)
+            foreach ($subfolder in $subfolders) {
+                Remove-AllTasksFromFolder -folder $subfolder
+            }
+        } catch {
+            Write-Host "Error processing folder: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+
+    # Start from root folder and delete everything
+    $rootFolder = $taskService.GetFolder("\")
+    Remove-AllTasksFromFolder -folder $rootFolder
+
+    Write-Host "All scheduled tasks deleted" -ForegroundColor Green
+} catch {
+    Write-Host "Error accessing Task Scheduler: $($_.Exception.Message)" -ForegroundColor Yellow
+}
+#endregion
+
 #region Clear Event Logs
 # Clear event logs to free up space (with better error handling)
 Write-Host "Clearing event logs..." -ForegroundColor Cyan
@@ -701,7 +745,7 @@ try {
     $eventLogs = Get-WinEvent -ListLog * -ErrorAction Stop | Where-Object { $_.RecordCount -gt 0 -and $_.IsEnabled -eq $true }
     $clearedCount = 0
     $totalLogs = $eventLogs.Count
-    
+
     foreach ($log in $eventLogs) {
         try {
             [System.Diagnostics.Eventing.Reader.EventLogSession]::GlobalSession.ClearLog("$($log.LogName)")
