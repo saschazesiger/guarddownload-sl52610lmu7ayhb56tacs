@@ -63,34 +63,43 @@ Returns a minimal health JSON:
 ```
 
 ### POST /command
-Accepts JSON body to execute a PowerShell command:
-```json
-{
-  "command": "Get-Process | Select-Object -First 1",
-  "async": false,
-  "id": "optional-uuid-when-async",
-  "context": "admin | user"
-}
+Body is the PowerShell command to execute (raw text). Example:
+```
+curl -X POST http://localhost:60000/command --data-binary "Get-Process | Select-Object -First 1"
 ```
 
-- When `async` is `true`, `id` is required. The endpoint immediately returns:
+Async execution is controlled via headers:
+- `async: true` (or `1`) to run in background
+- `id: <your-correlation-id>` is required when `async` is true
+
+Examples:
+- Sync:
+```
+curl -X POST http://localhost:60000/command --data-binary "Get-ChildItem C:\\"
+```
+
+- Async:
+```
+curl -X POST http://localhost:60000/command -H "async: true" -H "id: 123-abc" --data-binary "Get-Date"
+```
+
+Responses:
+- Async request returns immediately:
 ```json
 { "status": "ok", "id": "<provided-id>" }
 ```
-and, after execution finishes, posts a webhook to
+and, after completion, a webhook is posted to
 `https://dev1.srv.browser.lol/v7/workpsace/PQ0r6CvP7Arr03TiDMGbBxHF6bCyqaSb` with:
 ```json
 { "status": "ok" | "error", "output": "<combined stdout/stderr>", "id": "<provided-id>" }
 ```
 
-- When `async` is `false`, the endpoint waits for completion and returns:
+- Sync request waits and returns:
 ```json
 { "status": "ok" | "error", "output": "<combined stdout/stderr>" }
 ```
 
-#### Context execution
-- `context: "admin"` (default): Runs the command as the service account (SYSTEM) in a non-interactive session via PowerShell. Stdout/stderr is captured and returned.
-- `context: "user"`: Runs the command in the currently logged-on interactive user session (GUI). This is intended for commands that need desktop access (e.g., launching Edge). Output capture is not supported in this mode; synchronous calls return `"output": "started in user session"` on success.
+Note: JSON payloads are not supported. Send only the raw PowerShell command in the request body. If `Content-Type: application/json` is used or the body looks like JSON, the request is rejected with 400.
 
 ## Configuration
 

@@ -12,6 +12,7 @@ import (
     "os"
     "os/exec"
     "os/signal"
+    "strings"
     "syscall"
     "time"
 
@@ -241,7 +242,7 @@ func (s *service) handleCommand(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    // Read command from request body
+    // Read body
     body, err := io.ReadAll(r.Body)
     if err != nil {
         w.Header().Set("Content-Type", "application/json")
@@ -251,7 +252,7 @@ func (s *service) handleCommand(w http.ResponseWriter, r *http.Request) {
     }
 
     command := string(body)
-    if command == "" {
+    if strings.TrimSpace(command) == "" {
         w.Header().Set("Content-Type", "application/json")
         w.WriteHeader(http.StatusBadRequest)
         _ = json.NewEncoder(w).Encode(CommandResult{Status: "error", Error: "command is required"})
