@@ -369,7 +369,49 @@ try {
     
     # Completely disable Chocolatey background services
     Disable-ServiceSafely -ServiceName "chocolatey-agent" -DisplayName "Chocolatey Agent Service"
-    
+
+    # Install WireGuard without GUI (service only)
+    Write-Host "Installing WireGuard (service only)..." -ForegroundColor Cyan
+    try {
+        choco install wireguard --confirm --no-progress
+        Write-Host "WireGuard installed successfully" -ForegroundColor Green
+
+        # Configure routing to ensure RDP (3389) and Guard service (60000) bypass WireGuard
+        Write-Host "Configuring network routing for critical services..." -ForegroundColor Cyan
+        try {
+            # Get the default gateway and interface for bypass routing
+            $defaultRoute = Get-NetRoute -DestinationPrefix "0.0.0.0/0" | Where-Object { $_.RouteMetric -eq (Get-NetRoute -DestinationPrefix "0.0.0.0/0" | Measure-Object RouteMetric -Minimum).Minimum } | Select-Object -First 1
+            $defaultGateway = $defaultRoute.NextHop
+            $defaultInterface = $defaultRoute.InterfaceIndex
+
+            # Create persistent routes for RDP and Guard service to bypass WireGuard
+            Write-Host "Adding persistent route for critical services via default gateway..." -ForegroundColor Yellow
+            route add 0.0.0.0 mask 0.0.0.0 $defaultGateway metric 1 if $defaultInterface -p 2>$null
+
+            # Create firewall rules to ensure these ports use the correct interface
+            Write-Host "Configuring firewall rules for service bypass..." -ForegroundColor Yellow
+
+            # Create rules with interface binding
+            New-NetFirewallRule -DisplayName "Force RDP via Default Interface" -Direction Outbound -Action Allow `
+                -Protocol TCP -LocalPort 3389 -InterfaceIndex $defaultInterface `
+                -Profile Any -Description "Ensures RDP traffic uses default interface, not WireGuard" `
+                -Enabled True -ErrorAction SilentlyContinue
+
+            New-NetFirewallRule -DisplayName "Force Guard Service via Default Interface" -Direction Outbound -Action Allow `
+                -Protocol TCP -LocalPort 60000 -InterfaceIndex $defaultInterface `
+                -Profile Any -Description "Ensures Guard service traffic uses default interface, not WireGuard" `
+                -Enabled True -ErrorAction SilentlyContinue
+
+            Write-Host "Network routing configured - RDP and Guard service will bypass WireGuard" -ForegroundColor Green
+        }
+        catch {
+            Write-ErrorLog -FunctionName "WireGuardRouting" -ErrorMessage "Error configuring bypass routing for critical services" -ErrorRecord $_
+        }
+    }
+    catch {
+        Write-ErrorLog -FunctionName "WireGuardInstall" -ErrorMessage "Error installing WireGuard" -ErrorRecord $_
+    }
+
     Write-Host "Chocolatey installation completed" -ForegroundColor Green
 }
 catch {
