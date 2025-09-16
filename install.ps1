@@ -16,7 +16,9 @@ Write-Host "INSTALLATION SUMMARY" -ForegroundColor Cyan
 Write-Host "="*60 -ForegroundColor Cyan
 
 # Stop transcript logging
-try { Stop-Transcript | Out-Null } catch { }l web requests (older .NET defaults may fail GitHub/Chocolatey downloads)
+try { Stop-Transcript | Out-Null } catch { }
+
+# Ensure TLS 1.2 for web requests (older .NET defaults may fail GitHub/Chocolatey downloads)
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
 
 # Ensure the script is running with Administrator privileges
@@ -122,12 +124,22 @@ function Disable-ServiceSafely {
                     try {
                         $servicePath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
                         if (Test-Path $servicePath) {
-                            Set-ItemProperty -Path $servicePath -Name "Start" -Value 4 -Type DWord -Force
+                            # Take ownership and modify permissions for highly protected services
+                            try {
+                                $acl = Get-Acl $servicePath
+                                $accessRule = New-Object System.Security.AccessControl.RegistryAccessRule("BUILTIN\Administrators","FullControl","Allow")
+                                $acl.SetAccessRule($accessRule)
+                                Set-Acl -Path $servicePath -AclObject $acl -ErrorAction SilentlyContinue
+                            } catch {
+                                # Ignore ACL errors
+                            }
+
+                            Set-ItemProperty -Path $servicePath -Name "Start" -Value 4 -Type DWord -Force -ErrorAction Stop
                             Write-Host "Set registry start value for: $DisplayName" -ForegroundColor Green
                         }
                     }
                     catch {
-                        Write-Host "Cannot modify registry for protected service: $DisplayName" -ForegroundColor Yellow
+                        Write-Host "Cannot modify registry for protected service: $DisplayName (registry access denied)" -ForegroundColor Yellow
                     }
                 } else {
                     $errorMsg = "Could not set service to 'Disabled'. Reason: " + $_.Exception.Message
@@ -470,8 +482,21 @@ try {
 }
 "@
 
+                # Ensure Guard.ch directory exists for the script
+                $guardScriptDir = "$env:ProgramData\Guard.ch"
+                if (!(Test-Path $guardScriptDir)) {
+                    try {
+                        New-Item -Path $guardScriptDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
+                        Write-Host "Created Guard script directory: $guardScriptDir" -ForegroundColor Green
+                    }
+                    catch {
+                        Write-ErrorLog -FunctionName "WireGuardRouting" -ErrorMessage "Failed to create Guard script directory" -ErrorRecord $_
+                        return
+                    }
+                }
+
                 # Save the post-WireGuard script
-                $scriptPath = "$env:ProgramData\Guard.ch\configure-port-bypass.ps1"
+                $scriptPath = "$guardScriptDir\configure-port-bypass.ps1"
                 $postWireGuardScript | Out-File -FilePath $scriptPath -Encoding UTF8 -Force
 
                 # Create a scheduled task to run the script when network changes occur
