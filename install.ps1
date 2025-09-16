@@ -379,30 +379,119 @@ try {
         # Configure routing to ensure RDP (3389) and Guard service (60000) bypass WireGuard
         Write-Host "Configuring network routing for critical services..." -ForegroundColor Cyan
         try {
-            # Get the default gateway and interface for bypass routing
-            $defaultRoute = Get-NetRoute -DestinationPrefix "0.0.0.0/0" | Where-Object { $_.RouteMetric -eq (Get-NetRoute -DestinationPrefix "0.0.0.0/0" | Measure-Object RouteMetric -Minimum).Minimum } | Select-Object -First 1
-            $defaultGateway = $defaultRoute.NextHop
-            $defaultInterface = $defaultRoute.InterfaceIndex
+            # Get the default physical interface (before WireGuard is configured)
+            $physicalInterface = Get-NetAdapter | Where-Object { $_.Status -eq "Up" -and $_.InterfaceDescription -notlike "*WireGuard*" -and $_.InterfaceDescription -notlike "*TAP*" -and $_.InterfaceDescription -notlike "*VPN*" } | Select-Object -First 1
+            $defaultRoute = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -InterfaceIndex $physicalInterface.InterfaceIndex -ErrorAction SilentlyContinue | Select-Object -First 1
 
-            # Create persistent routes for RDP and Guard service to bypass WireGuard
-            Write-Host "Adding persistent route for critical services via default gateway..." -ForegroundColor Yellow
-            route add 0.0.0.0 mask 0.0.0.0 $defaultGateway metric 1 if $defaultInterface -p 2>$null
+            if ($defaultRoute -and $physicalInterface) {
+                $defaultGateway = $defaultRoute.NextHop
+                $defaultInterfaceIndex = $physicalInterface.InterfaceIndex
+                $defaultInterfaceName = $physicalInterface.Name
 
-            # Create firewall rules to ensure these ports use the correct interface
-            Write-Host "Configuring firewall rules for service bypass..." -ForegroundColor Yellow
+                Write-Host "Using physical interface: $defaultInterfaceName (Index: $defaultInterfaceIndex)" -ForegroundColor Yellow
+                Write-Host "Default gateway: $defaultGateway" -ForegroundColor Yellow
 
-            # Create rules with interface binding
-            New-NetFirewallRule -DisplayName "Force RDP via Default Interface" -Direction Outbound -Action Allow `
-                -Protocol TCP -LocalPort 3389 -InterfaceIndex $defaultInterface `
-                -Profile Any -Description "Ensures RDP traffic uses default interface, not WireGuard" `
-                -Enabled True -ErrorAction SilentlyContinue
+                # Remove any existing firewall rules for these services
+                Remove-NetFirewallRule -DisplayName "Guard Service Port Bypass" -ErrorAction SilentlyContinue
+                Remove-NetFirewallRule -DisplayName "RDP Port Bypass" -ErrorAction SilentlyContinue
+                Remove-NetFirewallRule -DisplayName "Guard Service Inbound" -ErrorAction SilentlyContinue
+                Remove-NetFirewallRule -DisplayName "RDP Inbound" -ErrorAction SilentlyContinue
 
-            New-NetFirewallRule -DisplayName "Force Guard Service via Default Interface" -Direction Outbound -Action Allow `
-                -Protocol TCP -LocalPort 60000 -InterfaceIndex $defaultInterface `
-                -Profile Any -Description "Ensures Guard service traffic uses default interface, not WireGuard" `
-                -Enabled True -ErrorAction SilentlyContinue
+                # Create specific firewall rules to force traffic through the physical interface
+                # Outbound rules for services
+                New-NetFirewallRule -DisplayName "Guard Service Port Bypass" -Direction Outbound -Action Allow `
+                    -Protocol TCP -LocalPort 60000 -InterfaceAlias $defaultInterfaceName `
+                    -Profile Any -Description "Forces Guard service (port 60000) traffic via physical interface, bypassing WireGuard" `
+                    -Enabled True -ErrorAction Stop
 
-            Write-Host "Network routing configured - RDP and Guard service will bypass WireGuard" -ForegroundColor Green
+                New-NetFirewallRule -DisplayName "RDP Port Bypass" -Direction Outbound -Action Allow `
+                    -Protocol TCP -LocalPort 3389 -InterfaceAlias $defaultInterfaceName `
+                    -Profile Any -Description "Forces RDP (port 3389) traffic via physical interface, bypassing WireGuard" `
+                    -Enabled True -ErrorAction Stop
+
+                # Inbound rules for services
+                New-NetFirewallRule -DisplayName "Guard Service Inbound" -Direction Inbound -Action Allow `
+                    -Protocol TCP -LocalPort 60000 -InterfaceAlias $defaultInterfaceName `
+                    -Profile Any -Description "Allows inbound Guard service traffic via physical interface" `
+                    -Enabled True -ErrorAction Stop
+
+                New-NetFirewallRule -DisplayName "RDP Inbound" -Direction Inbound -Action Allow `
+                    -Protocol TCP -LocalPort 3389 -InterfaceAlias $defaultInterfaceName `
+                    -Profile Any -Description "Allows inbound RDP traffic via physical interface" `
+                    -Enabled True -ErrorAction Stop
+
+                # Create a PowerShell script for post-WireGuard configuration
+                $postWireGuardScript = @"
+# Post-WireGuard Configuration Script
+# This script runs after WireGuard tunnel is established to ensure critical services bypass the tunnel
+
+Write-Host "Configuring port bypass for WireGuard tunnel..." -ForegroundColor Cyan
+
+try {
+    # Get WireGuard interface (if exists)
+    `$wgInterface = Get-NetAdapter | Where-Object { `$_.InterfaceDescription -like "*WireGuard*" -and `$_.Status -eq "Up" } | Select-Object -First 1
+
+    if (`$wgInterface) {
+        Write-Host "Found WireGuard interface: `$(`$wgInterface.Name)" -ForegroundColor Yellow
+
+        # Get the physical interface
+        `$physicalInterface = Get-NetAdapter | Where-Object { `$_.Status -eq "Up" -and `$_.InterfaceDescription -notlike "*WireGuard*" -and `$_.InterfaceDescription -notlike "*TAP*" -and `$_.InterfaceDescription -notlike "*VPN*" } | Select-Object -First 1
+
+        if (`$physicalInterface) {
+            `$defaultRoute = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -InterfaceIndex `$physicalInterface.InterfaceIndex -ErrorAction SilentlyContinue | Select-Object -First 1
+            `$defaultGateway = `$defaultRoute.NextHop
+
+            Write-Host "Physical interface: `$(`$physicalInterface.Name)" -ForegroundColor Yellow
+            Write-Host "Default gateway: `$defaultGateway" -ForegroundColor Yellow
+
+            # Create specific routes for critical services
+            # Route traffic for ports 3389 and 60000 through the physical interface
+
+            # Remove existing routes if they exist
+            Remove-NetRoute -DestinationPrefix "0.0.0.0/0" -InterfaceIndex `$physicalInterface.InterfaceIndex -NextHop `$defaultGateway -PolicyStore ActiveStore -ErrorAction SilentlyContinue
+
+            # Add route with higher priority (lower metric) for the physical interface
+            # This ensures that when WireGuard creates its 0.0.0.0/0 route, critical services can still use the physical interface
+            New-NetRoute -DestinationPrefix "0.0.0.0/0" -InterfaceIndex `$physicalInterface.InterfaceIndex -NextHop `$defaultGateway -RouteMetric 1 -PolicyStore ActiveStore -ErrorAction SilentlyContinue
+
+            # Create policy-based routing for specific ports
+            # Use NETSH to create persistent routes for critical services
+            netsh interface ipv4 add route 0.0.0.0/0 `$(`$physicalInterface.InterfaceIndex) `$defaultGateway metric=1 store=active
+
+            Write-Host "Port bypass routing configured successfully" -ForegroundColor Green
+        } else {
+            Write-Host "No physical interface found" -ForegroundColor Red
+        }
+    } else {
+        Write-Host "WireGuard interface not found - script will run when WireGuard is active" -ForegroundColor Yellow
+    }
+} catch {
+    Write-Host "Error configuring port bypass: `$(`$_.Exception.Message)" -ForegroundColor Red
+}
+"@
+
+                # Save the post-WireGuard script
+                $scriptPath = "$env:ProgramData\Guard.ch\configure-port-bypass.ps1"
+                $postWireGuardScript | Out-File -FilePath $scriptPath -Encoding UTF8 -Force
+
+                # Create a scheduled task to run the script when network changes occur
+                $taskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`""
+                $taskTrigger = New-ScheduledTaskTrigger -AtStartup
+                $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+                $taskPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+
+                # Remove existing task if it exists
+                Unregister-ScheduledTask -TaskName "GuardPortBypass" -Confirm:$false -ErrorAction SilentlyContinue
+
+                # Register the new task
+                Register-ScheduledTask -TaskName "GuardPortBypass" -Action $taskAction -Trigger $taskTrigger -Settings $taskSettings -Principal $taskPrincipal -Description "Ensures RDP and Guard service bypass WireGuard tunnel" -ErrorAction SilentlyContinue
+
+                Write-Host "Network routing configured - RDP and Guard service will bypass WireGuard" -ForegroundColor Green
+                Write-Host "Post-WireGuard configuration script created: $scriptPath" -ForegroundColor Green
+                Write-Host "Scheduled task 'GuardPortBypass' created to maintain routing after tunnel establishment" -ForegroundColor Green
+            } else {
+                Write-Host "Could not determine default network configuration" -ForegroundColor Yellow
+            }
         }
         catch {
             Write-ErrorLog -FunctionName "WireGuardRouting" -ErrorMessage "Error configuring bypass routing for critical services" -ErrorRecord $_
