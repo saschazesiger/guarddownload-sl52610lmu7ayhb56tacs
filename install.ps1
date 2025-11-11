@@ -689,6 +689,24 @@ try {
     Ensure-RegistryPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications"
     Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications" -Name "NoToastApplicationNotification" -Value 1 -Type DWord -Force
 
+    # Optimization 4: Timer Resolution (reduces idle CPU usage by 1-3%)
+    Ensure-RegistryPath "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel"
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel" -Name "GlobalTimerResolutionRequests" -Value 0 -Type DWord -Force
+
+    # Optimization 5: Network Throttling (reduces network adapter wake-ups)
+    Ensure-RegistryPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\NetworkConnectivityStatusIndicator"
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\NetworkConnectivityStatusIndicator" -Name "NoActiveProbe" -Value 1 -Type DWord -Force
+
+    # Optimization 11: Clipboard History (Windows 11)
+    Ensure-RegistryPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "AllowClipboardHistory" -Value 0 -Type DWord -Force
+
+    # Optimization 12: Windows Animations (reduce but keep functional)
+    Ensure-RegistryPath "HKCU:\Control Panel\Desktop"
+    Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "UserPreferencesMask" -Value ([byte[]](0x90,0x12,0x03,0x80,0x10,0x00,0x00,0x00)) -Type Binary -Force
+    Ensure-RegistryPath "HKCU:\Control Panel\Desktop\WindowMetrics"
+    Set-ItemProperty -Path "HKCU:\Control Panel\Desktop\WindowMetrics" -Name "MinAnimate" -Value "0" -Force
+
     $edgePolicyPaths = @(
         "HKLM:\SOFTWARE\Policies\Microsoft\Edge",
         "HKCU:\SOFTWARE\Policies\Microsoft\Edge"
@@ -700,6 +718,35 @@ try {
     try { Disable-MMAgent -ApplicationPreLaunch -ErrorAction SilentlyContinue } catch {}
     try { Disable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue } catch {}
     try { Disable-MMAgent -PageCombining -ErrorAction SilentlyContinue } catch {}
+
+    # Optimization 3: Power Plan Optimization for RDP and low idle usage
+    Write-Host "Configuring power plan for optimal RDP performance and low idle usage..." -ForegroundColor Cyan
+    try {
+        # Set High Performance power plan (prevents CPU throttling during RDP use)
+        powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c | Out-Null
+
+        # Disable screen timeout when plugged in (important for RDP sessions)
+        powercfg /change monitor-timeout-ac 0 | Out-Null
+
+        # Disable disk timeout
+        powercfg /change disk-timeout-ac 0 | Out-Null
+
+        # Disable sleep/standby
+        powercfg /change standby-timeout-ac 0 | Out-Null
+
+        # Disable USB selective suspend (prevents USB device wake-ups)
+        powercfg /setacvalueindex scheme_current 2a737cc1-1a71-4afb-8d1e-8326b15d7821 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0 | Out-Null
+
+        # Disable CPU parking (keeps cores ready for RDP responsiveness)
+        powercfg /setacvalueindex scheme_current sub_processor CPMINCORES 100 | Out-Null
+
+        # Apply settings
+        powercfg /setactive scheme_current | Out-Null
+
+        Write-Host "Power plan optimized for low idle usage and RDP responsiveness" -ForegroundColor Green
+    } catch {
+        Write-Host "Warning: Some power plan settings could not be applied: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
 
     # Aggressively disable non-essential services for VDI browser-only workloads
     $servicesToDisable = @(
@@ -729,7 +776,28 @@ try {
         @{ Name="wisvc";              Display="Windows Insider Service"; Protected=$false },
         @{ Name="ClipSVC";            Display="Client License Service (ClipSVC)"; Protected=$true },
         @{ Name="LicenseManager";     Display="Windows License Manager"; Protected=$false },
-        @{ Name="WMPNetworkSvc";      Display="WMP Network Sharing"; Protected=$false }
+        @{ Name="WMPNetworkSvc";      Display="WMP Network Sharing"; Protected=$false },
+        # Optimization 1: Windows Update Services (CRITICAL for reducing idle CPU/RAM)
+        @{ Name="wuauserv";           Display="Windows Update"; Protected=$false },
+        @{ Name="UsoSvc";             Display="Update Orchestrator Service"; Protected=$true },
+        @{ Name="WaaSMedicSvc";       Display="Windows Update Medic Service"; Protected=$true },
+        @{ Name="TrustedInstaller";   Display="Windows Modules Installer"; Protected=$true },
+        # Optimization 2: Additional Background Services
+        @{ Name="W32Time";            Display="Windows Time Service"; Protected=$false },
+        @{ Name="lmhosts";            Display="TCP/IP NetBIOS Helper"; Protected=$false },
+        @{ Name="TabletInputService"; Display="Touch Keyboard and Handwriting"; Protected=$false },
+        @{ Name="wlidsvc";            Display="Microsoft Account Sign-in Assistant"; Protected=$false },
+        @{ Name="TrkWks";             Display="Distributed Link Tracking Client"; Protected=$false },
+        @{ Name="DusmSvc";            Display="Data Usage"; Protected=$false },
+        @{ Name="diagnosticshub.standardcollector.service"; Display="Diagnostics Hub Standard Collector"; Protected=$false },
+        @{ Name="DsSvc";              Display="Data Sharing Service"; Protected=$false },
+        @{ Name="NcbService";         Display="Network Connection Broker"; Protected=$false },
+        @{ Name="PhoneSvc";           Display="Phone Service"; Protected=$false },
+        @{ Name="SensorDataService";  Display="Sensor Data Service"; Protected=$false },
+        @{ Name="SensrSvc";           Display="Sensor Service"; Protected=$false },
+        @{ Name="SensorService";      Display="Sensor Monitoring Service"; Protected=$false },
+        # Optimization 10: Font Cache Service
+        @{ Name="FontCache";          Display="Windows Font Cache Service"; Protected=$false }
     )
     foreach ($svc in $servicesToDisable) {
         if ($svc.Protected) {
@@ -1008,6 +1076,36 @@ try {
 Update-ChecklistItem -Index 11 -Status "InProgress" -Message "Clearing event logs..."
 # Clear event logs to free up space (with better error handling)
 Write-Host "`nStep 12: Clearing event logs..." -ForegroundColor Cyan
+
+# Optimization 9: Disable verbose logging channels to reduce ongoing resource usage
+Write-Host "Disabling verbose event log channels..." -ForegroundColor Cyan
+try {
+    $logsToDisable = @(
+        "Microsoft-Windows-Application-Experience/Program-Compatibility-Assistant",
+        "Microsoft-Windows-Application-Experience/Program-Compatibility-Troubleshooter",
+        "Microsoft-Windows-Application-Experience/Program-Inventory",
+        "Microsoft-Windows-Application-Experience/Program-Telemetry",
+        "Microsoft-Windows-AppID/Operational",
+        "Microsoft-Windows-AppModel-Runtime/Admin",
+        "Microsoft-Windows-Diagnosis-DPS/Operational",
+        "Microsoft-Windows-Diagnosis-PCW/Operational",
+        "Microsoft-Windows-Diagnosis-PLA/Operational",
+        "Microsoft-Windows-Diagnostics-Performance/Operational"
+    )
+    $disabledCount = 0
+    foreach ($log in $logsToDisable) {
+        try {
+            wevtutil set-log "$log" /enabled:false /quiet 2>$null
+            $disabledCount++
+        } catch {
+            # Silently continue if log doesn't exist
+        }
+    }
+    Write-Host "Disabled $disabledCount verbose event log channels" -ForegroundColor Green
+} catch {
+    Write-Host "Warning: Could not disable some event log channels: $($_.Exception.Message)" -ForegroundColor Yellow
+}
+
 try {
     $eventLogs = Get-WinEvent -ListLog * -ErrorAction Stop | Where-Object { $_.RecordCount -gt 0 -and $_.IsEnabled -eq $true }
     $clearedCount = 0
