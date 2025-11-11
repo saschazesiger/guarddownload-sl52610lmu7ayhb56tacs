@@ -178,7 +178,7 @@ function Write-ErrorLog {
     if ($ErrorRecord) {
         $errorDetails = " - " + $ErrorRecord.Exception.GetType().Name + ": " + $ErrorRecord.Exception.Message
     }
-    $logMessage = "[$timestamp] ERROR in $FunctionName: $ErrorMessage$errorDetails"
+    $logMessage = "[$timestamp] ERROR in ${FunctionName}: $ErrorMessage$errorDetails"
 
     # Output in console window
     Write-Host $logMessage -ForegroundColor Red
