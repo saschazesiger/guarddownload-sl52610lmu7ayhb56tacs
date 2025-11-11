@@ -3,11 +3,8 @@
 # Notes:
 # - Requires administrative privileges.
 # - Logs are written to %TEMP% with a timestamped filename via Start-Transcript.
-# - Functions provide safe helpers for registry, services, first-run suppression, and update hardening.
-# - Features GUI checklist for tracking installation progress
 
 #region Setup and initialization
-# Start transcript logging with timestamp for better tracking
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $logPath = "$env:TEMP\guard_install_$timestamp.log"
 Start-Transcript -Path $logPath -Force
@@ -17,7 +14,7 @@ Write-Host "GUARD.CH INSTALLATION SCRIPT" -ForegroundColor Cyan
 Write-Host "="*60 -ForegroundColor Cyan
 Write-Host "Log file: $logPath" -ForegroundColor Gray
 
-# Ensure TLS 1.2 for web requests (older .NET defaults may fail GitHub/Chocolatey downloads)
+# Ensure TLS 1.2 for web requests
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     Write-Host "TLS 1.2 configured successfully" -ForegroundColor Green
@@ -42,123 +39,8 @@ if (-not (Test-IsAdministrator)) {
 
 Write-Host "Administrator privileges confirmed" -ForegroundColor Green
 
-# Global variables for tracking
+# Global error tracking
 $global:errorLog = @()
-$global:installationSteps = [System.Collections.ArrayList]@()
-$global:currentStepIndex = 0
-
-# GUI Checklist class
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-
-$global:guiForm = $null
-$global:checklistBox = $null
-
-# Function to create GUI checklist
-function Initialize-GuiChecklist {
-    param (
-        [string[]]$Steps
-    )
-
-    try {
-        $global:guiForm = New-Object System.Windows.Forms.Form
-        $global:guiForm.Text = "Guard.ch Installation Progress"
-        $global:guiForm.Size = New-Object System.Drawing.Size(600, 500)
-        $global:guiForm.StartPosition = "CenterScreen"
-        $global:guiForm.TopMost = $true
-        $global:guiForm.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
-        $global:guiForm.MaximizeBox = $false
-
-        # Title label
-        $titleLabel = New-Object System.Windows.Forms.Label
-        $titleLabel.Location = New-Object System.Drawing.Point(10, 10)
-        $titleLabel.Size = New-Object System.Drawing.Size(580, 30)
-        $titleLabel.Text = "Guard.ch System Installation - Progress Checklist"
-        $titleLabel.Font = New-Object System.Drawing.Font("Arial", 12, [System.Drawing.FontStyle]::Bold)
-        $global:guiForm.Controls.Add($titleLabel)
-
-        # Checklist box
-        $global:checklistBox = New-Object System.Windows.Forms.CheckedListBox
-        $global:checklistBox.Location = New-Object System.Drawing.Point(10, 50)
-        $global:checklistBox.Size = New-Object System.Drawing.Size(560, 350)
-        $global:checklistBox.Font = New-Object System.Drawing.Font("Consolas", 9)
-        $global:checklistBox.CheckOnClick = $false
-
-        foreach ($step in $Steps) {
-            [void]$global:checklistBox.Items.Add("[ ] $step", $false)
-        }
-
-        $global:guiForm.Controls.Add($global:checklistBox)
-
-        # Progress label
-        $global:progressLabel = New-Object System.Windows.Forms.Label
-        $global:progressLabel.Location = New-Object System.Drawing.Point(10, 410)
-        $global:progressLabel.Size = New-Object System.Drawing.Size(560, 20)
-        $global:progressLabel.Text = "Starting installation..."
-        $global:progressLabel.Font = New-Object System.Drawing.Font("Arial", 9, [System.Drawing.FontStyle]::Italic)
-        $global:guiForm.Controls.Add($global:progressLabel)
-
-        # Show form non-blocking
-        $global:guiForm.Show()
-        [System.Windows.Forms.Application]::DoEvents()
-
-        Write-Host "GUI checklist initialized with $($Steps.Count) steps" -ForegroundColor Green
-    } catch {
-        Write-Host "Warning: Could not create GUI checklist: $($_.Exception.Message)" -ForegroundColor Yellow
-        Write-Host "Continuing with console-only mode..." -ForegroundColor Yellow
-    }
-}
-
-# Function to update checklist item
-function Update-ChecklistItem {
-    param (
-        [int]$Index,
-        [ValidateSet("InProgress", "Completed", "Failed")]
-        [string]$Status,
-        [string]$Message = ""
-    )
-
-    try {
-        if ($null -ne $global:checklistBox -and $Index -lt $global:checklistBox.Items.Count) {
-            $stepText = $global:installationSteps[$Index]
-
-            switch ($Status) {
-                "InProgress" {
-                    $global:checklistBox.Items[$Index] = "[>] $stepText"
-                    $global:checklistBox.SetItemCheckState($Index, [System.Windows.Forms.CheckState]::Indeterminate)
-                    if ($Message) { $global:progressLabel.Text = $Message }
-                }
-                "Completed" {
-                    $global:checklistBox.Items[$Index] = "[✓] $stepText"
-                    $global:checklistBox.SetItemChecked($Index, $true)
-                    if ($Message) { $global:progressLabel.Text = $Message }
-                }
-                "Failed" {
-                    $global:checklistBox.Items[$Index] = "[✗] $stepText"
-                    $global:checklistBox.SetItemCheckState($Index, [System.Windows.Forms.CheckState]::Unchecked)
-                    if ($Message) { $global:progressLabel.Text = $Message }
-                }
-            }
-
-            [System.Windows.Forms.Application]::DoEvents()
-        }
-    } catch {
-        Write-Host "Warning: Could not update GUI: $($_.Exception.Message)" -ForegroundColor Yellow
-    }
-}
-
-# Function to close GUI
-function Close-GuiChecklist {
-    try {
-        if ($null -ne $global:guiForm) {
-            Start-Sleep -Seconds 2
-            $global:guiForm.Close()
-            $global:guiForm.Dispose()
-        }
-    } catch {
-        Write-Host "Warning: Could not close GUI: $($_.Exception.Message)" -ForegroundColor Yellow
-    }
-}
 
 # Function for better error logs
 function Write-ErrorLog {
@@ -186,26 +68,6 @@ function Write-ErrorLog {
     # Add to global error log
     $global:errorLog += $logMessage
 }
-
-# Define installation steps
-$global:installationSteps = @(
-    "Initialize system prerequisites",
-    "Configure firewall rules",
-    "Install Chocolatey package manager",
-    "Install WireGuard VPN",
-    "Configure network routing",
-    "Apply VDI optimizations",
-    "Disable unnecessary services",
-    "Install Guard monitoring service",
-    "Configure auto-login",
-    "Configure session limits",
-    "Clear scheduled tasks",
-    "Clear event logs",
-    "Schedule system reboot"
-)
-
-# Initialize GUI checklist
-Initialize-GuiChecklist -Steps $global:installationSteps
 
 #region Helper Functions
 # Function to safely disable a service
@@ -446,35 +308,30 @@ function Uninstall-GuardService {
 #endregion
 
 #region Step 1: Initialize system prerequisites
-Update-ChecklistItem -Index 0 -Status "InProgress" -Message "Initializing system prerequisites..."
+Write-Host "`nStep 1: Initializing system prerequisites" -ForegroundColor Cyan
 try {
-    Write-Host "`nStep 1: Initializing system prerequisites" -ForegroundColor Cyan
     # Prerequisites already handled in setup section
-    Update-ChecklistItem -Index 0 -Status "Completed" -Message "System prerequisites initialized"
+    Write-Host "System prerequisites initialized" -ForegroundColor Green
 } catch {
     Write-ErrorLog -FunctionName "InitializePrerequisites" -ErrorMessage "Failed to initialize prerequisites" -ErrorRecord $_
-    Update-ChecklistItem -Index 0 -Status "Failed" -Message "Failed to initialize prerequisites"
 }
 #endregion
 
 #region Step 2: Configure firewall rules
-Update-ChecklistItem -Index 1 -Status "InProgress" -Message "Configuring firewall rules..."
 Write-Host "`nStep 2: Configuring firewall for GuardMonitor..." -ForegroundColor Cyan
 # Remove any existing rule first to avoid duplicates
 Remove-NetFirewallRule -DisplayName "Allow GuardMonitor" -ErrorAction SilentlyContinue
 
-# Create new firewall rule - more specific parameters
+# Create new firewall rule
 try {
     New-NetFirewallRule -DisplayName "Allow GuardMonitor" -Direction Inbound -Action Allow `
         -Program "C:\ProgramData\Guard.ch\guardsrv.exe" -Protocol TCP -LocalPort 60000 `
         -Profile Any -Description "Allows GuardMonitor web server on port 60000 for status reporting" `
         -Enabled True -ErrorAction Stop
     Write-Host "Firewall rule created successfully for Guard web server (port 60000)." -ForegroundColor Green
-    Update-ChecklistItem -Index 1 -Status "Completed" -Message "Firewall rules configured"
 } catch {
     $errorMsg = "Firewall rule could not be created. Reason: " + $_.Exception.Message
     Write-ErrorLog -FunctionName "FirewallConfiguration" -ErrorMessage $errorMsg -ErrorRecord $_
-    Update-ChecklistItem -Index 1 -Status "Failed" -Message "Failed to configure firewall"
 }
 #endregion
 
@@ -521,7 +378,6 @@ function Suppress-FirstRunExperiences {
 #endregion
 
 #region Step 3: Install Chocolatey
-Update-ChecklistItem -Index 2 -Status "InProgress" -Message "Installing Chocolatey package manager..."
 Write-Host "`nStep 3: Installing Chocolatey..." -ForegroundColor Cyan
 try {
     # Install chocolatey
@@ -533,99 +389,84 @@ try {
     choco feature disable --name="autouninstaller" --confirm
     choco feature disable --name="checksumFiles" --confirm
     choco feature disable --name="showDownloadProgress" --confirm
-    # Note: autoUpgrade feature may not exist in all Chocolatey versions
     choco feature disable --name="autoUpgrade" --confirm 2>$null
     Write-Host "Chocolatey auto-updates disabled" -ForegroundColor Green
 
-    # Refresh environment variables to include Chocolatey
+    # Refresh environment variables
     $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
 
-    # Completely disable Chocolatey background services
+    # Disable Chocolatey background services
     Disable-ServiceSafely -ServiceName "chocolatey-agent" -DisplayName "Chocolatey Agent Service"
-
-    Update-ChecklistItem -Index 2 -Status "Completed" -Message "Chocolatey installed successfully"
 }
 catch {
     Write-ErrorLog -FunctionName "ChocolateySetup" -ErrorMessage "Error installing Chocolatey" -ErrorRecord $_
-    Update-ChecklistItem -Index 2 -Status "Failed" -Message "Failed to install Chocolatey"
 }
 #endregion
 
 #region Step 4: Install WireGuard
-Update-ChecklistItem -Index 3 -Status "InProgress" -Message "Installing WireGuard VPN..."
 Write-Host "`nStep 4: Installing WireGuard (service only)..." -ForegroundColor Cyan
 try {
     choco install wireguard --confirm --no-progress
     Write-Host "WireGuard installed successfully" -ForegroundColor Green
-    Update-ChecklistItem -Index 3 -Status "Completed" -Message "WireGuard installed successfully"
-
 }
 catch {
     Write-ErrorLog -FunctionName "WireGuardInstall" -ErrorMessage "Error installing WireGuard" -ErrorRecord $_
-    Update-ChecklistItem -Index 3 -Status "Failed" -Message "Failed to install WireGuard"
 }
 #endregion
 
 #region Step 5: Configure network routing
-Update-ChecklistItem -Index 4 -Status "InProgress" -Message "Configuring network routing for critical services..."
 Write-Host "`nStep 5: Configuring network routing for critical services..." -ForegroundColor Cyan
 try {
-            # Get the default physical interface (before WireGuard is configured)
-            $physicalInterface = Get-NetAdapter | Where-Object { $_.Status -eq "Up" -and $_.InterfaceDescription -notlike "*WireGuard*" -and $_.InterfaceDescription -notlike "*TAP*" -and $_.InterfaceDescription -notlike "*VPN*" } | Select-Object -First 1
-            $defaultRoute = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -InterfaceIndex $physicalInterface.InterfaceIndex -ErrorAction SilentlyContinue | Select-Object -First 1
+    # Get the default physical interface (before WireGuard is configured)
+    $physicalInterface = Get-NetAdapter | Where-Object { $_.Status -eq "Up" -and $_.InterfaceDescription -notlike "*WireGuard*" -and $_.InterfaceDescription -notlike "*TAP*" -and $_.InterfaceDescription -notlike "*VPN*" } | Select-Object -First 1
+    $defaultRoute = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -InterfaceIndex $physicalInterface.InterfaceIndex -ErrorAction SilentlyContinue | Select-Object -First 1
 
-            if ($defaultRoute -and $physicalInterface) {
-                $defaultGateway = $defaultRoute.NextHop
-                $defaultInterfaceIndex = $physicalInterface.InterfaceIndex
-                $defaultInterfaceName = $physicalInterface.Name
+    if ($defaultRoute -and $physicalInterface) {
+        $defaultGateway = $defaultRoute.NextHop
+        $defaultInterfaceIndex = $physicalInterface.InterfaceIndex
+        $defaultInterfaceName = $physicalInterface.Name
 
-                Write-Host "Using physical interface: $defaultInterfaceName (Index: $defaultInterfaceIndex)" -ForegroundColor Yellow
-                Write-Host "Default gateway: $defaultGateway" -ForegroundColor Yellow
+        Write-Host "Using physical interface: $defaultInterfaceName (Index: $defaultInterfaceIndex)" -ForegroundColor Yellow
+        Write-Host "Default gateway: $defaultGateway" -ForegroundColor Yellow
 
-                # Remove any existing firewall rules for these services
-                Remove-NetFirewallRule -DisplayName "Guard Service Port Bypass" -ErrorAction SilentlyContinue
-                Remove-NetFirewallRule -DisplayName "RDP Port Bypass" -ErrorAction SilentlyContinue
-                Remove-NetFirewallRule -DisplayName "Guard Service Inbound" -ErrorAction SilentlyContinue
-                Remove-NetFirewallRule -DisplayName "RDP Inbound" -ErrorAction SilentlyContinue
+        # Remove any existing firewall rules
+        Remove-NetFirewallRule -DisplayName "Guard Service Port Bypass" -ErrorAction SilentlyContinue
+        Remove-NetFirewallRule -DisplayName "RDP Port Bypass" -ErrorAction SilentlyContinue
+        Remove-NetFirewallRule -DisplayName "Guard Service Inbound" -ErrorAction SilentlyContinue
+        Remove-NetFirewallRule -DisplayName "RDP Inbound" -ErrorAction SilentlyContinue
 
-                # Create specific firewall rules to force traffic through the physical interface
-                # Outbound rules for services
-                New-NetFirewallRule -DisplayName "Guard Service Port Bypass" -Direction Outbound -Action Allow `
-                    -Protocol TCP -LocalPort 60000 -InterfaceAlias $defaultInterfaceName `
-                    -Profile Any -Description "Forces Guard service (port 60000) traffic via physical interface, bypassing WireGuard" `
-                    -Enabled True -ErrorAction Stop
+        # Create firewall rules to force traffic through the physical interface
+        New-NetFirewallRule -DisplayName "Guard Service Port Bypass" -Direction Outbound -Action Allow `
+            -Protocol TCP -LocalPort 60000 -InterfaceAlias $defaultInterfaceName `
+            -Profile Any -Description "Forces Guard service (port 60000) traffic via physical interface, bypassing WireGuard" `
+            -Enabled True -ErrorAction Stop
 
-                New-NetFirewallRule -DisplayName "RDP Port Bypass" -Direction Outbound -Action Allow `
-                    -Protocol TCP -LocalPort 3389 -InterfaceAlias $defaultInterfaceName `
-                    -Profile Any -Description "Forces RDP (port 3389) traffic via physical interface, bypassing WireGuard" `
-                    -Enabled True -ErrorAction Stop
+        New-NetFirewallRule -DisplayName "RDP Port Bypass" -Direction Outbound -Action Allow `
+            -Protocol TCP -LocalPort 3389 -InterfaceAlias $defaultInterfaceName `
+            -Profile Any -Description "Forces RDP (port 3389) traffic via physical interface, bypassing WireGuard" `
+            -Enabled True -ErrorAction Stop
 
-                # Inbound rules for services
-                New-NetFirewallRule -DisplayName "Guard Service Inbound" -Direction Inbound -Action Allow `
-                    -Protocol TCP -LocalPort 60000 -InterfaceAlias $defaultInterfaceName `
-                    -Profile Any -Description "Allows inbound Guard service traffic via physical interface" `
-                    -Enabled True -ErrorAction Stop
+        New-NetFirewallRule -DisplayName "Guard Service Inbound" -Direction Inbound -Action Allow `
+            -Protocol TCP -LocalPort 60000 -InterfaceAlias $defaultInterfaceName `
+            -Profile Any -Description "Allows inbound Guard service traffic via physical interface" `
+            -Enabled True -ErrorAction Stop
 
-                New-NetFirewallRule -DisplayName "RDP Inbound" -Direction Inbound -Action Allow `
-                    -Protocol TCP -LocalPort 3389 -InterfaceAlias $defaultInterfaceName `
-                    -Profile Any -Description "Allows inbound RDP traffic via physical interface" `
-                    -Enabled True -ErrorAction Stop
+        New-NetFirewallRule -DisplayName "RDP Inbound" -Direction Inbound -Action Allow `
+            -Protocol TCP -LocalPort 3389 -InterfaceAlias $defaultInterfaceName `
+            -Profile Any -Description "Allows inbound RDP traffic via physical interface" `
+            -Enabled True -ErrorAction Stop
 
-                Write-Host "Network routing configured - RDP and Guard service will bypass WireGuard" -ForegroundColor Green
-                Update-ChecklistItem -Index 4 -Status "Completed" -Message "Network routing configured"
-            } else {
-                Write-Host "Could not determine default network configuration" -ForegroundColor Yellow
-                Update-ChecklistItem -Index 4 -Status "Completed" -Message "Network routing completed with warnings"
-            }
+        Write-Host "Network routing configured - RDP and Guard service will bypass WireGuard" -ForegroundColor Green
+    } else {
+        Write-Host "Could not determine default network configuration" -ForegroundColor Yellow
+    }
 }
 catch {
     Write-ErrorLog -FunctionName "WireGuardRouting" -ErrorMessage "Error configuring bypass routing for critical services" -ErrorRecord $_
-    Update-ChecklistItem -Index 4 -Status "Failed" -Message "Failed to configure network routing"
 }
 #endregion
 
 #region Step 6: Apply VDI optimizations
-Update-ChecklistItem -Index 5 -Status "InProgress" -Message "Applying VDI optimizations..."
 Write-Host "`nStep 6: Applying VDI background-usage minimization..." -ForegroundColor Cyan
 
 try {
@@ -876,20 +717,14 @@ try {
     }
 
     Write-Host "VDI background-usage minimization applied" -ForegroundColor Green
-    Update-ChecklistItem -Index 5 -Status "Completed" -Message "VDI optimizations applied"
 }
 catch {
     Write-ErrorLog -FunctionName "VDI-Optimization" -ErrorMessage ("Failed to apply VDI background minimization: " + $_.Exception.Message) -ErrorRecord $_
-    Update-ChecklistItem -Index 5 -Status "Failed" -Message "Failed to apply VDI optimizations"
 }
-
-# Step 7 is embedded in Step 6 (Disable unnecessary services)
-Update-ChecklistItem -Index 6 -Status "Completed" -Message "Unnecessary services disabled"
 #endregion
 
-#region Step 8: Install Guard monitoring service
-Update-ChecklistItem -Index 7 -Status "InProgress" -Message "Installing Guard monitoring service..."
-Write-Host "`nStep 8: Setting up Guard.ch..." -ForegroundColor Cyan
+#region Step 7: Install Guard monitoring service
+Write-Host "`nStep 7: Setting up Guard.ch..." -ForegroundColor Cyan
 
 # Define service parameters
 $serviceName = "GuardDownloadService"
@@ -944,102 +779,83 @@ try {
         Write-Host "Web server available at http://localhost:60000 for status monitoring" -ForegroundColor Green
         Write-Host "  - GET /status returns current node status as JSON" -ForegroundColor Gray
         Write-Host "  - GET / returns service information" -ForegroundColor Gray
-        Update-ChecklistItem -Index 7 -Status "Completed" -Message "Guard service installed successfully"
     } else {
         Write-Host "Guard service installation encountered issues - check logs for details" -ForegroundColor Yellow
-        Update-ChecklistItem -Index 7 -Status "Failed" -Message "Guard service installation had issues"
     }
 }
 catch {
     Write-ErrorLog -FunctionName "InstallGuardSoftware" -ErrorMessage "Failed to download or install Guard software: $($_.Exception.Message)" -ErrorRecord $_
-    Update-ChecklistItem -Index 7 -Status "Failed" -Message "Failed to install Guard service"
 }
 #endregion
 
-#region Step 9: Configure auto-login
-Update-ChecklistItem -Index 8 -Status "InProgress" -Message "Configuring auto-login..."
-Write-Host "`nStep 9: Setting up auto login..." -ForegroundColor Cyan
+#region Step 8: Configure auto-login
+Write-Host "`nStep 8: Setting up auto login..." -ForegroundColor Cyan
 
 try {
     # Registry path for auto login
     $winLogonPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
-    
-    # Set auto login parameters to match autounattend.xml configuration
-    # The autounattend.xml creates a user "User" (display name "GuardAccount") and enables auto login for Administrator
-    # We need to configure auto login for the actual user created by autounattend.xml
+
+    # Set auto login parameters
     Set-ItemProperty -Path $winLogonPath -Name "AutoAdminLogon" -Value "1" -Type String -Force
     Set-ItemProperty -Path $winLogonPath -Name "DefaultUserName" -Value "User" -Type String -Force
     Set-ItemProperty -Path $winLogonPath -Name "DefaultPassword" -Value "GuardUser5046!" -Type String -Force
     Set-ItemProperty -Path $winLogonPath -Name "DefaultDomainName" -Value "." -Type String -Force
-    
-    # Ensure auto login count is not limited (remove count limit set by autounattend.xml)
+
+    # Remove auto login count limit
     Remove-ItemProperty -Path $winLogonPath -Name "AutoLogonCount" -ErrorAction SilentlyContinue
 
     Write-Host "Auto login configured successfully" -ForegroundColor Green
-    Update-ChecklistItem -Index 8 -Status "Completed" -Message "Auto-login configured"
 }
 catch {
     Write-ErrorLog -FunctionName "ConfigureAutoLogin" -ErrorMessage "Error configuring auto login" -ErrorRecord $_
-    Update-ChecklistItem -Index 8 -Status "Failed" -Message "Failed to configure auto-login"
 }
 #endregion
 
-#region Step 10: Configure session limits
-Update-ChecklistItem -Index 9 -Status "InProgress" -Message "Configuring session limits..."
-Write-Host "`nStep 10: Configuring session limits..." -ForegroundColor Cyan
+#region Step 9: Configure session limits
+Write-Host "`nStep 9: Configuring session limits..." -ForegroundColor Cyan
 
 try {
-    # Limit concurrent sessions for user account to 1
+    # Limit concurrent sessions to 1
     $terminalServicesPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server"
     Ensure-RegistryPath $terminalServicesPath
-    
-    # Set maximum concurrent sessions to 1
     Set-ItemProperty -Path $terminalServicesPath -Name "MaxInstanceCount" -Value 1 -Type DWord -Force
-    
+
     # Configure Terminal Services user settings
     $tsUserPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Terminal Server\Install\Software\Microsoft\Windows\CurrentVersion\RunOnce"
     Ensure-RegistryPath $tsUserPath
-    
-    # Set user-specific session limit
+
     $userProfilePath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
     Ensure-RegistryPath $userProfilePath
-    
+
     # Configure RDP connection limits
     $rdpPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
     if (Test-Path $rdpPath) {
         Set-ItemProperty -Path $rdpPath -Name "MaxInstanceCount" -Value 1 -Type DWord -Force
         Set-ItemProperty -Path $rdpPath -Name "MaxConnectionTime" -Value 0 -Type DWord -Force
     }
-    
+
     Write-Host "Session limits configured successfully (max 1 concurrent session)" -ForegroundColor Green
 
     # Disable lock screen
     Ensure-RegistryPath "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization"
     Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization" -Name "NoLockScreen" -Value 1 -Type DWord -Force
-
-    Update-ChecklistItem -Index 9 -Status "Completed" -Message "Session limits configured"
 }
 catch {
     Write-ErrorLog -FunctionName "ConfigureSessionLimits" -ErrorMessage "Error configuring session limits" -ErrorRecord $_
-    Update-ChecklistItem -Index 9 -Status "Failed" -Message "Failed to configure session limits"
 }
 #endregion
 
-#region Step 11: Clear scheduled tasks
-Update-ChecklistItem -Index 10 -Status "InProgress" -Message "Clearing scheduled tasks..."
-# Delete all scheduled tasks to minimize background activity
-Write-Host "`nStep 11: Clearing all scheduled tasks..." -ForegroundColor Cyan
+#region Step 10: Clear scheduled tasks
+Write-Host "`nStep 10: Clearing all scheduled tasks..." -ForegroundColor Cyan
 try {
     # Connect to Task Scheduler
     $taskService = New-Object -ComObject "Schedule.Service"
     $taskService.Connect()
 
-    # Function to recursively delete all tasks from a folder
+    # Function to recursively delete all tasks
     function Remove-AllTasksFromFolder {
         param($folder)
-
         try {
-            # Get all tasks in current folder and delete them
             $tasks = $folder.GetTasks(0)
             foreach ($task in $tasks) {
                 try {
@@ -1050,7 +866,6 @@ try {
                 }
             }
 
-            # Recursively process all subfolders
             $subfolders = $folder.GetFolders(0)
             foreach ($subfolder in $subfolders) {
                 Remove-AllTasksFromFolder -folder $subfolder
@@ -1060,24 +875,19 @@ try {
         }
     }
 
-    # Start from root folder and delete everything
     $rootFolder = $taskService.GetFolder("\")
     Remove-AllTasksFromFolder -folder $rootFolder
 
     Write-Host "All scheduled tasks deleted" -ForegroundColor Green
-    Update-ChecklistItem -Index 10 -Status "Completed" -Message "Scheduled tasks cleared"
 } catch {
     Write-Host "Error accessing Task Scheduler: $($_.Exception.Message)" -ForegroundColor Yellow
-    Update-ChecklistItem -Index 10 -Status "Failed" -Message "Failed to clear scheduled tasks"
 }
 #endregion
 
-#region Step 12: Clear event logs
-Update-ChecklistItem -Index 11 -Status "InProgress" -Message "Clearing event logs..."
-# Clear event logs to free up space (with better error handling)
-Write-Host "`nStep 12: Clearing event logs..." -ForegroundColor Cyan
+#region Step 11: Clear event logs
+Write-Host "`nStep 11: Clearing event logs..." -ForegroundColor Cyan
 
-# Optimization 9: Disable verbose logging channels to reduce ongoing resource usage
+# Disable verbose logging channels
 Write-Host "Disabling verbose event log channels..." -ForegroundColor Cyan
 try {
     $logsToDisable = @(
@@ -1097,9 +907,7 @@ try {
         try {
             wevtutil set-log "$log" /enabled:false /quiet 2>$null
             $disabledCount++
-        } catch {
-            # Silently continue if log doesn't exist
-        }
+        } catch { }
     }
     Write-Host "Disabled $disabledCount verbose event log channels" -ForegroundColor Green
 } catch {
@@ -1116,15 +924,12 @@ try {
             [System.Diagnostics.Eventing.Reader.EventLogSession]::GlobalSession.ClearLog("$($log.LogName)")
             $clearedCount++
         } catch {
-            # Silently continue for logs that cannot be cleared (common for system logs)
             Write-Verbose "Could not clear event log: $($log.LogName)"
         }
     }
     Write-Host "Event logs cleared successfully ($clearedCount of $totalLogs logs cleared)" -ForegroundColor Green
-    Update-ChecklistItem -Index 11 -Status "Completed" -Message "Event logs cleared"
 } catch {
     Write-Host "Error accessing event logs: $($_.Exception.Message)" -ForegroundColor Yellow
-    Update-ChecklistItem -Index 11 -Status "Failed" -Message "Failed to clear event logs"
 }
 #endregion
 
@@ -1145,17 +950,14 @@ try {
 }
 #endregion
 
-#region Step 13: Schedule reboot
-Update-ChecklistItem -Index 12 -Status "InProgress" -Message "Scheduling system reboot..."
-Write-Host "`nStep 13: Scheduling a reboot in 5 minutes..." -ForegroundColor Cyan
+#region Step 12: Schedule reboot
+Write-Host "`nStep 12: Scheduling a reboot in 5 minutes..." -ForegroundColor Cyan
 try {
     # Schedule restart in 300 seconds (5 minutes)
     shutdown.exe /r /t 300 /c "Guard install finished. System will reboot in 5 minutes." /d p:4:1
     Write-Host "Reboot scheduled. Run 'shutdown /a' to cancel if needed." -ForegroundColor Yellow
-    Update-ChecklistItem -Index 12 -Status "Completed" -Message "Reboot scheduled in 5 minutes"
 } catch {
     Write-ErrorLog -FunctionName "ScheduleReboot" -ErrorMessage "Failed to schedule reboot" -ErrorRecord $_
-    Update-ChecklistItem -Index 12 -Status "Failed" -Message "Failed to schedule reboot"
 }
 #endregion
 
@@ -1163,20 +965,6 @@ try {
 Write-Host "`n" + "="*60 -ForegroundColor Cyan
 Write-Host "INSTALLATION SUMMARY" -ForegroundColor Cyan
 Write-Host "="*60 -ForegroundColor Cyan
-
-$completedSteps = 0
-$failedSteps = 0
-for ($i = 0; $i -lt $global:installationSteps.Count; $i++) {
-    if ($global:checklistBox.GetItemCheckState($i) -eq [System.Windows.Forms.CheckState]::Checked) {
-        $completedSteps++
-    } elseif ($global:checklistBox.Items[$i] -like "*[✗]*") {
-        $failedSteps++
-    }
-}
-
-Write-Host "Total steps: $($global:installationSteps.Count)" -ForegroundColor White
-Write-Host "Completed: $completedSteps" -ForegroundColor Green
-Write-Host "Failed: $failedSteps" -ForegroundColor $(if ($failedSteps -gt 0) { "Red" } else { "Green" })
 
 if ($global:errorLog.Count -gt 0) {
     Write-Host "`nErrors encountered during installation:" -ForegroundColor Yellow
@@ -1189,12 +977,6 @@ Write-Host "`nLog file: $logPath" -ForegroundColor Gray
 Write-Host "System will reboot in 5 minutes to complete installation." -ForegroundColor Yellow
 Write-Host "Run 'shutdown /a' to cancel the reboot if needed." -ForegroundColor Yellow
 Write-Host "="*60 -ForegroundColor Cyan
-
-# Keep GUI open for 10 seconds to allow user to review
-Start-Sleep -Seconds 10
-
-# Close GUI
-Close-GuiChecklist
 
 # Stop transcript logging
 try { Stop-Transcript | Out-Null } catch {}
