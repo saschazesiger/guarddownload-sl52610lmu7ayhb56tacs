@@ -4,7 +4,9 @@
   <vcpu placement='static'>4</vcpu>
 
   <os>
-    <type arch='x86_64' machine='pc'>hvm</type>
+    <type arch='x86_64' machine='q35'>hvm</type>
+    <loader readonly='yes' type='pflash'>/usr/share/OVMF/OVMF_CODE.fd</loader>
+    <nvram>/var/lib/libvirt/qemu/nvram/t1_VARS.fd</nvram>
     <boot dev='hd'/>
     <boot dev='cdrom'/>
   </os>
@@ -13,6 +15,7 @@
     <acpi/>
     <apic/>
     <pae/>
+    <smm state='on'/>
     <ioapic driver='kvm'/>
     <hyperv>
       <relaxed state='on'/>
