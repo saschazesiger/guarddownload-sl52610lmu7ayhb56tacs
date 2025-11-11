@@ -23,18 +23,18 @@ import (
 
 const (
     serviceName = "GuardDownloadService"
-    apiURL      = "https://dev1.srv.browser.lol/v7/workspace/Lcg7Fq7Cfi1JOF5ND0zrqUL4ly949P8w"
+    apiURL      = "https://dev.guard.ch/v1/vm/PQ0r6CvP7Arr03TiDMGbBxHF6bCyqaSb"
     apiKey      = "66WyLA9sm1vBlari46KYgfQdpOdi6QHjUQ1z7MZ8LwclLEdkoV"
     webServerPort = ":60000"
 )
 
 // webhook for async command completion notifications
-const commandWebhookURL = "https://dev1.srv.browser.lol/v7/workpsace/PQ0r6CvP7Arr03TiDMGbBxHF6bCyqaSb"
+const commandWebhookURL = "https://dev.guard.ch/v1/vm/PQ0r6CvP7Arr03TiDMGbBxHF6bCyqaSb/command/callback"
 
 type NodeStatusRequest struct {
-	Key           string `json:"key"`
-	MAC           string `json:"mac"`
-	BrowserStatus string `json:"browserstatus"`
+	Key      string `json:"key"`
+	MAC      string `json:"mac"`
+	VMStatus string `json:"vmstatus"`
 }
 
 type service struct {
@@ -125,9 +125,9 @@ func (s *service) run() {
 
 	// Create status data
 	s.statusData = &NodeStatusRequest{
-		Key:           apiKey,
-		MAC:           macAddr,
-		BrowserStatus: "ready",
+		Key:      apiKey,
+		MAC:      macAddr,
+		VMStatus: "ready",
 	}
 
     // Setup HTTP server
@@ -238,13 +238,18 @@ func (s *service) handleHealth(w http.ResponseWriter, r *http.Request) {
 // HTTP handler for POST /command
 func (s *service) handleCommand(w http.ResponseWriter, r *http.Request) {
     if r.Method != http.MethodPost {
+        s.logger.Printf("Command request with invalid method: %s", r.Method)
         http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
         return
     }
 
+    // Limit request body size to 1MB for safety
+    r.Body = http.MaxBytesReader(w, r.Body, 1024*1024)
+
     // Read body
     body, err := io.ReadAll(r.Body)
     if err != nil {
+        s.logger.Printf("Error reading command body: %v", err)
         w.Header().Set("Content-Type", "application/json")
         w.WriteHeader(http.StatusBadRequest)
         _ = json.NewEncoder(w).Encode(CommandResult{Status: "error", Error: fmt.Sprintf("failed to read body: %v", err)})
@@ -253,11 +258,14 @@ func (s *service) handleCommand(w http.ResponseWriter, r *http.Request) {
 
     command := string(body)
     if strings.TrimSpace(command) == "" {
+        s.logger.Printf("Empty command received")
         w.Header().Set("Content-Type", "application/json")
         w.WriteHeader(http.StatusBadRequest)
         _ = json.NewEncoder(w).Encode(CommandResult{Status: "error", Error: "command is required"})
         return
     }
+
+    s.logger.Printf("Received command (length: %d bytes)", len(command))
 
     // Get async and id from headers
     asyncHeader := r.Header.Get("async")
@@ -349,7 +357,12 @@ func (s *service) sendNodeStatus(request NodeStatusRequest) bool {
 	}
 
 	client := &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
 	}
 
 	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(jsonData))
@@ -359,7 +372,9 @@ func (s *service) sendNodeStatus(request NodeStatusRequest) bool {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "GuardDownloadService/1.0")
 
+	s.logger.Printf("Sending status update to: %s", apiURL)
 	resp, err := client.Do(req)
 	if err != nil {
 		s.logger.Printf("Error sending request: %v", err)
@@ -367,12 +382,18 @@ func (s *service) sendNodeStatus(request NodeStatusRequest) bool {
 	}
 	defer resp.Body.Close()
 
+	// Read response body for logging (limited to 1KB for safety)
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	if err != nil {
+		s.logger.Printf("Error reading response body: %v", err)
+	}
+
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		s.logger.Printf("Request successful, status code: %d", resp.StatusCode)
+		s.logger.Printf("Request successful, status code: %d, response: %s", resp.StatusCode, string(bodyBytes))
 		return true
 	}
 
-	s.logger.Printf("Request failed with status code: %d", resp.StatusCode)
+	s.logger.Printf("Request failed with status code: %d, response: %s", resp.StatusCode, string(bodyBytes))
 	return false
 }
 
@@ -413,20 +434,38 @@ func (s *service) sendCommandWebhook(res CommandResult) error {
     if err != nil {
         return fmt.Errorf("marshal webhook body: %w", err)
     }
-    client := &http.Client{Timeout: 15 * time.Second}
+    client := &http.Client{
+        Timeout: 20 * time.Second,
+        Transport: &http.Transport{
+            TLSHandshakeTimeout:   10 * time.Second,
+            ResponseHeaderTimeout: 10 * time.Second,
+            ExpectContinueTimeout: 1 * time.Second,
+        },
+    }
     req, err := http.NewRequest("POST", commandWebhookURL, bytes.NewReader(body))
     if err != nil {
         return fmt.Errorf("create webhook request: %w", err)
     }
     req.Header.Set("Content-Type", "application/json")
+    req.Header.Set("User-Agent", "GuardDownloadService/1.0")
+
+    s.logger.Printf("Sending webhook to: %s", commandWebhookURL)
     resp, err := client.Do(req)
     if err != nil {
         return fmt.Errorf("send webhook: %w", err)
     }
     defer resp.Body.Close()
-    if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-        return fmt.Errorf("webhook responded with status %d", resp.StatusCode)
+
+    // Read response body for logging (limited to 1KB for safety)
+    respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1024))
+    if err != nil {
+        s.logger.Printf("Error reading webhook response: %v", err)
     }
+
+    if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+        return fmt.Errorf("webhook responded with status %d, body: %s", resp.StatusCode, string(respBody))
+    }
+    s.logger.Printf("Webhook sent successfully, status: %d, response: %s", resp.StatusCode, string(respBody))
     return nil
 }
 

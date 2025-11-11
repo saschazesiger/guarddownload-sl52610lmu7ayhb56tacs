@@ -31,6 +31,11 @@
 				<AcceptEula>true</AcceptEula>
 			</UserData>
 			<UseConfigurationSet>false</UseConfigurationSet>
+			<DriverPaths>
+				<PathAndCredentials wcm:action="add" wcm:keyValue="1">
+					<Path>E:\</Path>
+				</PathAndCredentials>
+			</DriverPaths>
 			<RunSynchronous>
 				<RunSynchronousCommand wcm:action="add">
 					<Order>1</Order>
@@ -337,10 +342,47 @@ New-Item -Path $key -ItemType 'Directory' -ErrorAction 'SilentlyContinue';
 Set-ItemProperty -LiteralPath $key -Name 'ConfigureStartPins' -Value $json -Type 'String';
 		</File>
 		<File path="C:\Windows\Setup\Scripts\unattend-01.ps1">
-$desktop = [Environment]::GetFolderPath("Desktop")
-$file = Join-Path $desktop "install_remote.ps1"
-$content = 'iex (Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/saschazesiger/guarddownload-sl52610lmu7ayhb56tacs/refs/heads/main/install.ps1").Content'
-Set-Content -Path $file -Value $content -Encoding UTF8
+try {
+	# Get desktop path for all users
+	$publicDesktop = [Environment]::GetFolderPath("CommonDesktopDirectory")
+	$userDesktop = [Environment]::GetFolderPath("Desktop")
+
+	# Try user desktop first, fallback to public desktop
+	$desktop = if (Test-Path $userDesktop) { $userDesktop } else { $publicDesktop }
+
+	# Ensure desktop directory exists
+	if (-not (Test-Path $desktop)) {
+		New-Item -Path $desktop -ItemType Directory -Force -ErrorAction Stop | Out-Null
+	}
+
+	$file = Join-Path $desktop "install_remote.ps1"
+	$content = 'iex (Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/saschazesiger/guarddownload-sl52610lmu7ayhb56tacs/refs/heads/main/install.ps1").Content'
+
+	# Create the file with error handling
+	Set-Content -Path $file -Value $content -Encoding UTF8 -Force -ErrorAction Stop
+
+	# Verify file was created
+	if (Test-Path $file) {
+		Write-Host "Successfully created install_remote.ps1 at: $file" -ForegroundColor Green
+
+		# Also create a desktop shortcut for easy access
+		$WshShell = New-Object -ComObject WScript.Shell
+		$Shortcut = $WshShell.CreateShortcut("$desktop\Run Guard Install.lnk")
+		$Shortcut.TargetPath = "powershell.exe"
+		$Shortcut.Arguments = "-ExecutionPolicy Bypass -File `"$file`""
+		$Shortcut.WorkingDirectory = $desktop
+		$Shortcut.Description = "Run Guard Installation Script"
+		$Shortcut.Save()
+	} else {
+		throw "File creation failed - file does not exist after Set-Content"
+	}
+} catch {
+	# Log error to a file for troubleshooting
+	$errorLog = "C:\Windows\Setup\Scripts\unattend-01-error.log"
+	$errorMessage = "Error creating install_remote.ps1: $($_.Exception.Message)`r`n$($_.ScriptStackTrace)"
+	Set-Content -Path $errorLog -Value $errorMessage -Force
+	Write-Host "Error: $errorMessage" -ForegroundColor Red
+}
 		</File>
 		<File path="C:\Windows\Setup\Scripts\Specialize.ps1">
 $scripts = @(
@@ -504,16 +546,41 @@ $scripts = @(
 		<File path="C:\Windows\Setup\Scripts\FirstLogon.ps1">
 $scripts = @(
 	{
-		Set-ItemProperty -LiteralPath 'Registry::HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name 'AutoLogonCount' -Type 'DWord' -Force -Value 0;
+		try {
+			Set-ItemProperty -LiteralPath 'Registry::HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name 'AutoLogonCount' -Type 'DWord' -Force -Value 0 -ErrorAction Stop;
+		} catch {
+			Write-Host "Warning: Could not reset AutoLogonCount: $($_.Exception.Message)" -ForegroundColor Yellow;
+		}
 	};
 	{
-		Disable-ComputerRestore -Drive 'C:\';
+		try {
+			Disable-ComputerRestore -Drive 'C:\' -ErrorAction Stop;
+		} catch {
+			Write-Host "Warning: Could not disable computer restore: $($_.Exception.Message)" -ForegroundColor Yellow;
+		}
 	};
 	{
-		cmd.exe /c "rmdir C:\Windows.old";
+		try {
+			cmd.exe /c "rmdir C:\Windows.old" 2&gt;&amp;1 | Out-Null;
+		} catch {
+			Write-Host "Warning: Could not remove Windows.old: $($_.Exception.Message)" -ForegroundColor Yellow;
+		}
 	};
 	{
-		Get-Content -LiteralPath 'C:\Windows\Setup\Scripts\unattend-01.ps1' -Raw | Invoke-Expression;
+		try {
+			$scriptPath = 'C:\Windows\Setup\Scripts\unattend-01.ps1';
+			if (Test-Path $scriptPath) {
+				Get-Content -LiteralPath $scriptPath -Raw -ErrorAction Stop | Invoke-Expression;
+				Write-Host "Successfully executed unattend-01.ps1" -ForegroundColor Green;
+			} else {
+				throw "Script file not found: $scriptPath";
+			}
+		} catch {
+			Write-Host "Error executing unattend-01.ps1: $($_.Exception.Message)" -ForegroundColor Red;
+			# Log to file for troubleshooting
+			$errorLog = "C:\Windows\Setup\Scripts\FirstLogon-error.log";
+			"$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Error: $($_.Exception.Message)" | Out-File -FilePath $errorLog -Append -Force;
+		}
 	};
 );
 
