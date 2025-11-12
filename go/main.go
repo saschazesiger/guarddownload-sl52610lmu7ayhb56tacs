@@ -157,26 +157,11 @@ func (s *service) run() {
 		// Initial status report - keep trying until successful
 		for {
 			if s.sendNodeStatus(*s.statusData) {
-				s.logger.Println("Successfully sent initial node status")
-				break
+				s.logger.Println("Successfully sent initial node status - stopping periodic reports")
+				return // Stop after successful send
 			}
 			s.logger.Println("Failed to send initial node status, retrying in 5 seconds...")
 			time.Sleep(5 * time.Second)
-		}
-
-		// Continue with periodic reporting (every 5 minutes)
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-		
-		for {
-			select {
-			case <-ticker.C:
-				if s.sendNodeStatus(*s.statusData) {
-					s.logger.Println("Periodic status report sent successfully")
-				} else {
-					s.logger.Println("Failed to send periodic status report")
-				}
-			}
 		}
 	}()
 
