@@ -958,6 +958,49 @@ try {
 }
 #endregion
 
+#region Create Transfer Folder
+Write-Host "`nCreating Transfer folder on Desktop..." -ForegroundColor Cyan
+try {
+    $desktop = [Environment]::GetFolderPath("Desktop")
+    $transferFolder = Join-Path $desktop "Transfer"
+
+    # Create the Transfer folder if it doesn't exist
+    if (!(Test-Path $transferFolder)) {
+        New-Item -Path $transferFolder -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        Write-Host "Created Transfer folder: $transferFolder" -ForegroundColor Green
+    } else {
+        Write-Host "Transfer folder already exists: $transferFolder" -ForegroundColor Yellow
+    }
+
+    # Set custom folder icon (folder with upload arrow)
+    # Create desktop.ini file to customize the folder icon
+    $desktopIniPath = Join-Path $transferFolder "desktop.ini"
+    $desktopIniContent = @"
+[.ShellClassInfo]
+IconResource=%SystemRoot%\System32\imageres.dll,-1025
+[ViewState]
+Mode=
+Vid=
+FolderType=Generic
+"@
+
+    # Write desktop.ini file
+    Set-Content -Path $desktopIniPath -Value $desktopIniContent -Force -ErrorAction Stop
+
+    # Set desktop.ini as hidden and system file
+    $desktopIniFile = Get-Item $desktopIniPath -Force
+    $desktopIniFile.Attributes = 'Hidden,System,Archive'
+
+    # Set folder as system folder to enable custom icon
+    $transferFolderItem = Get-Item $transferFolder -Force
+    $transferFolderItem.Attributes = 'Directory,ReadOnly'
+
+    Write-Host "Transfer folder icon configured successfully" -ForegroundColor Green
+} catch {
+    Write-ErrorLog -FunctionName "CreateTransferFolder" -ErrorMessage "Failed to create Transfer folder or set icon" -ErrorRecord $_
+}
+#endregion
+
 #region Step 12: Schedule reboot
 Write-Host "`nStep 12: Scheduling a reboot in 5 minutes..." -ForegroundColor Cyan
 try {

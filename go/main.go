@@ -1,6 +1,7 @@
 package main
 
 import (
+    "archive/zip"
     "bytes"
     "context"
     "encoding/json"
@@ -12,6 +13,7 @@ import (
     "os"
     "os/exec"
     "os/signal"
+    "path/filepath"
     "strings"
     "syscall"
     "time"
@@ -26,6 +28,7 @@ const (
     apiURL      = "https://dev.guard.ch/v1/vm/PQ0r6CvP7Arr03TiDMGbBxHF6bCyqaSb"
     apiKey      = "66WyLA9sm1vBlari46KYgfQdpOdi6QHjUQ1z7MZ8LwclLEdkoV"
     webServerPort = ":60000"
+    maxFileSize   = 1 << 30 // 1GB in bytes
 )
 
 // webhook for async command completion notifications
@@ -135,6 +138,10 @@ func (s *service) run() {
     mux.HandleFunc("/status", s.handleStatus)
     mux.HandleFunc("/health", s.handleHealth)
     mux.HandleFunc("/command", s.handleCommand)
+    mux.HandleFunc("/file", s.handleFile)
+    mux.HandleFunc("/download", s.handleDownload)
+    mux.HandleFunc("/upload", s.handleUpload)
+    mux.HandleFunc("/url", s.handleURL)
     mux.HandleFunc("/", s.handleRoot) // Default handler
 	
 	s.httpServer = &http.Server{
@@ -311,9 +318,9 @@ func (s *service) handleRoot(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	
+
 	w.Header().Set("Content-Type", "application/json")
-	
+
     info := map[string]interface{}{
         "service": serviceName,
         "version": "1.0",
@@ -323,15 +330,395 @@ func (s *service) handleRoot(w http.ResponseWriter, r *http.Request) {
             "status": "/status",
             "health": "/health",
             "command": "/command",
+            "file": "/file",
+            "download": "/download",
+            "upload": "/upload",
+            "url": "/url",
         },
         "description": "Guard.ch monitoring service",
     }
-	
+
 	if err := json.NewEncoder(w).Encode(info); err != nil {
 		s.logger.Printf("Error encoding root response: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
+}
+
+// getTransferFolder returns the path to the Transfer folder on Desktop
+func getTransferFolder() (string, error) {
+    userProfile := os.Getenv("USERPROFILE")
+    if userProfile == "" {
+        return "", fmt.Errorf("USERPROFILE environment variable not set")
+    }
+    transferPath := filepath.Join(userProfile, "Desktop", "Transfer")
+
+    // Create the folder if it doesn't exist
+    if err := os.MkdirAll(transferPath, 0755); err != nil {
+        return "", fmt.Errorf("failed to create transfer folder: %w", err)
+    }
+
+    return transferPath, nil
+}
+
+// FileInfo represents a file or folder in the transfer directory
+type FileInfo struct {
+    Name    string `json:"name"`
+    IsDir   bool   `json:"is_dir"`
+    Size    int64  `json:"size"`
+    ModTime string `json:"mod_time"`
+}
+
+// HTTP handler for GET /file - lists all files in Transfer folder
+func (s *service) handleFile(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodGet {
+        http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+
+    transferPath, err := getTransferFolder()
+    if err != nil {
+        s.logger.Printf("Error getting transfer folder: %v", err)
+        http.Error(w, fmt.Sprintf("Error getting transfer folder: %v", err), http.StatusInternalServerError)
+        return
+    }
+
+    entries, err := os.ReadDir(transferPath)
+    if err != nil {
+        s.logger.Printf("Error reading transfer folder: %v", err)
+        http.Error(w, fmt.Sprintf("Error reading transfer folder: %v", err), http.StatusInternalServerError)
+        return
+    }
+
+    files := make([]FileInfo, 0)
+    for _, entry := range entries {
+        // Skip desktop.ini
+        if entry.Name() == "desktop.ini" {
+            continue
+        }
+
+        info, err := entry.Info()
+        if err != nil {
+            s.logger.Printf("Error getting file info for %s: %v", entry.Name(), err)
+            continue
+        }
+
+        files = append(files, FileInfo{
+            Name:    entry.Name(),
+            IsDir:   entry.IsDir(),
+            Size:    info.Size(),
+            ModTime: info.ModTime().Format(time.RFC3339),
+        })
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    if err := json.NewEncoder(w).Encode(files); err != nil {
+        s.logger.Printf("Error encoding file list: %v", err)
+        http.Error(w, "Internal server error", http.StatusInternalServerError)
+        return
+    }
+
+    s.logger.Printf("File list served: %d items", len(files))
+}
+
+// HTTP handler for GET /download - downloads a file or zipped folder
+func (s *service) handleDownload(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodGet {
+        http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+
+    filename := r.URL.Query().Get("file")
+    if filename == "" {
+        http.Error(w, "Missing 'file' query parameter", http.StatusBadRequest)
+        return
+    }
+
+    transferPath, err := getTransferFolder()
+    if err != nil {
+        s.logger.Printf("Error getting transfer folder: %v", err)
+        http.Error(w, fmt.Sprintf("Error getting transfer folder: %v", err), http.StatusInternalServerError)
+        return
+    }
+
+    filePath := filepath.Join(transferPath, filename)
+
+    // Security check: ensure the file is within the transfer folder
+    if !strings.HasPrefix(filepath.Clean(filePath), filepath.Clean(transferPath)) {
+        s.logger.Printf("Security violation: attempt to access file outside transfer folder: %s", filename)
+        http.Error(w, "Invalid file path", http.StatusBadRequest)
+        return
+    }
+
+    fileInfo, err := os.Stat(filePath)
+    if err != nil {
+        s.logger.Printf("Error accessing file %s: %v", filename, err)
+        http.Error(w, "File not found", http.StatusNotFound)
+        return
+    }
+
+    if fileInfo.IsDir() {
+        // Check total folder size before zipping
+        var totalSize int64
+        err := filepath.Walk(filePath, func(path string, info os.FileInfo, err error) error {
+            if err != nil {
+                return err
+            }
+            if !info.IsDir() {
+                totalSize += info.Size()
+            }
+            return nil
+        })
+        if err != nil {
+            s.logger.Printf("Error calculating folder size: %v", err)
+            http.Error(w, "Error calculating folder size", http.StatusInternalServerError)
+            return
+        }
+
+        if totalSize > maxFileSize {
+            s.logger.Printf("Folder too large: %d bytes (max: %d)", totalSize, maxFileSize)
+            http.Error(w, fmt.Sprintf("Folder size exceeds 1GB limit (size: %d bytes)", totalSize), http.StatusRequestEntityTooLarge)
+            return
+        }
+
+        // Create ZIP file in memory
+        w.Header().Set("Content-Type", "application/zip")
+        w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.zip\"", filename))
+
+        zipWriter := zip.NewWriter(w)
+        defer zipWriter.Close()
+
+        err = filepath.Walk(filePath, func(path string, info os.FileInfo, err error) error {
+            if err != nil {
+                return err
+            }
+
+            // Get relative path
+            relPath, err := filepath.Rel(filePath, path)
+            if err != nil {
+                return err
+            }
+
+            // Create zip header
+            header, err := zip.FileInfoHeader(info)
+            if err != nil {
+                return err
+            }
+            header.Name = filepath.Join(filename, relPath)
+            header.Method = zip.Deflate
+
+            if info.IsDir() {
+                header.Name += "/"
+            } else {
+                writer, err := zipWriter.CreateHeader(header)
+                if err != nil {
+                    return err
+                }
+
+                file, err := os.Open(path)
+                if err != nil {
+                    return err
+                }
+                defer file.Close()
+
+                _, err = io.Copy(writer, file)
+                if err != nil {
+                    return err
+                }
+            }
+
+            return nil
+        })
+
+        if err != nil {
+            s.logger.Printf("Error creating zip: %v", err)
+            return
+        }
+
+        s.logger.Printf("Downloaded folder as zip: %s (total size: %d bytes)", filename, totalSize)
+    } else {
+        // Regular file download
+        if fileInfo.Size() > maxFileSize {
+            s.logger.Printf("File too large: %d bytes (max: %d)", fileInfo.Size(), maxFileSize)
+            http.Error(w, fmt.Sprintf("File size exceeds 1GB limit (size: %d bytes)", fileInfo.Size()), http.StatusRequestEntityTooLarge)
+            return
+        }
+
+        w.Header().Set("Content-Type", "application/octet-stream")
+        w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+        w.Header().Set("Content-Length", fmt.Sprintf("%d", fileInfo.Size()))
+
+        file, err := os.Open(filePath)
+        if err != nil {
+            s.logger.Printf("Error opening file: %v", err)
+            http.Error(w, "Error opening file", http.StatusInternalServerError)
+            return
+        }
+        defer file.Close()
+
+        _, err = io.Copy(w, file)
+        if err != nil {
+            s.logger.Printf("Error sending file: %v", err)
+            return
+        }
+
+        s.logger.Printf("Downloaded file: %s (%d bytes)", filename, fileInfo.Size())
+    }
+}
+
+// HTTP handler for POST /upload - uploads a file to Transfer folder
+func (s *service) handleUpload(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+
+    // Limit request body size to 1GB + some overhead
+    r.Body = http.MaxBytesReader(w, r.Body, maxFileSize+1024)
+
+    err := r.ParseMultipartForm(32 << 20) // 32MB max memory
+    if err != nil {
+        s.logger.Printf("Error parsing multipart form: %v", err)
+        http.Error(w, fmt.Sprintf("Error parsing upload: %v", err), http.StatusBadRequest)
+        return
+    }
+
+    file, header, err := r.FormFile("file")
+    if err != nil {
+        s.logger.Printf("Error getting uploaded file: %v", err)
+        http.Error(w, "Missing or invalid 'file' field", http.StatusBadRequest)
+        return
+    }
+    defer file.Close()
+
+    // Check file size
+    if header.Size > maxFileSize {
+        s.logger.Printf("Uploaded file too large: %d bytes (max: %d)", header.Size, maxFileSize)
+        http.Error(w, fmt.Sprintf("File size exceeds 1GB limit (size: %d bytes)", header.Size), http.StatusRequestEntityTooLarge)
+        return
+    }
+
+    transferPath, err := getTransferFolder()
+    if err != nil {
+        s.logger.Printf("Error getting transfer folder: %v", err)
+        http.Error(w, fmt.Sprintf("Error getting transfer folder: %v", err), http.StatusInternalServerError)
+        return
+    }
+
+    // Sanitize filename
+    filename := filepath.Base(header.Filename)
+    destPath := filepath.Join(transferPath, filename)
+
+    // Create destination file
+    destFile, err := os.Create(destPath)
+    if err != nil {
+        s.logger.Printf("Error creating destination file: %v", err)
+        http.Error(w, "Error saving file", http.StatusInternalServerError)
+        return
+    }
+    defer destFile.Close()
+
+    // Copy uploaded file to destination
+    written, err := io.Copy(destFile, file)
+    if err != nil {
+        s.logger.Printf("Error writing file: %v", err)
+        os.Remove(destPath) // Clean up partial file
+        http.Error(w, "Error saving file", http.StatusInternalServerError)
+        return
+    }
+
+    s.logger.Printf("File uploaded: %s (%d bytes)", filename, written)
+
+    w.Header().Set("Content-Type", "application/json")
+    response := map[string]interface{}{
+        "status":   "ok",
+        "filename": filename,
+        "size":     written,
+    }
+    json.NewEncoder(w).Encode(response)
+}
+
+// HTTP handler for POST /url - opens a URL in Edge browser on desktop
+func (s *service) handleURL(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+
+    // Read URL from request body
+    body, err := io.ReadAll(io.LimitReader(r.Body, 2048))
+    if err != nil {
+        s.logger.Printf("Error reading URL body: %v", err)
+        http.Error(w, "Error reading request", http.StatusBadRequest)
+        return
+    }
+
+    url := strings.TrimSpace(string(body))
+    if url == "" {
+        http.Error(w, "URL is required", http.StatusBadRequest)
+        return
+    }
+
+    // Validate URL format (basic check)
+    if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+        http.Error(w, "URL must start with http:// or https://", http.StatusBadRequest)
+        return
+    }
+
+    s.logger.Printf("Opening URL in Edge: %s", url)
+
+    // Create a scheduled task to open Edge in the user's desktop session
+    taskName := fmt.Sprintf("GuardOpenURL_%d", time.Now().Unix())
+
+    // PowerShell script to create and run task
+    psScript := fmt.Sprintf(`
+        $taskName = "%s"
+        $url = "%s"
+
+        # Get the current logged-in user
+        $username = (Get-WmiObject -Class Win32_ComputerSystem).UserName
+        if ($username -match "\\") {
+            $username = $username.Split("\")[1]
+        }
+
+        # Create task action to open Edge
+        $action = New-ScheduledTaskAction -Execute "msedge.exe" -Argument "$url"
+
+        # Create task principal to run as the logged-in user
+        $principal = New-ScheduledTaskPrincipal -UserId "$env:COMPUTERNAME\$username" -LogonType Interactive
+
+        # Create task settings
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+
+        # Register the task
+        Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
+
+        # Start the task immediately
+        Start-ScheduledTask -TaskName $taskName
+
+        # Wait a moment for the task to start
+        Start-Sleep -Seconds 2
+
+        # Clean up the task
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+    `, taskName, url)
+
+    // Execute the PowerShell script
+    output, err := runPowerShell(psScript)
+    if err != nil {
+        s.logger.Printf("Error opening URL: %v, output: %s", err, output)
+        http.Error(w, fmt.Sprintf("Error opening URL: %v", err), http.StatusInternalServerError)
+        return
+    }
+
+    s.logger.Printf("URL opened successfully: %s", url)
+
+    w.Header().Set("Content-Type", "application/json")
+    response := map[string]interface{}{
+        "status": "ok",
+        "url":    url,
+    }
+    json.NewEncoder(w).Encode(response)
 }
 
 func (s *service) sendNodeStatus(request NodeStatusRequest) bool {
